@@ -1,0 +1,11 @@
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+data/*.wav
+data/*.jsonl
+weights/
+models/*.onnx
+models/*.bin
+config/speaker_profiles.json
+.venv*/

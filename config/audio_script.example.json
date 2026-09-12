@@ -1,0 +1,29 @@
+{
+  "topic_name": "/voice_msg_speaker",
+  "message_type": "voice_service/msg/AudioMsg",
+  "loop": false,
+  "steps": [
+    {
+      "message": {
+        "user_id": "tester_01",
+        "role": "tester",
+        "asr_text": "你好，请看向我",
+        "emotion": "neutral",
+        "angle": 30.0,
+        "speaker_vector": []
+      },
+      "period_sec": 0.5
+    },
+    {
+      "message": {
+        "user_id": "tester_02",
+        "role": "tester",
+        "asr_text": "不是现在开始",
+        "emotion": "neutral",
+        "angle": -45.0,
+        "speaker_vector": []
+      },
+      "period_sec": 0.5
+    }
+  ]
+}

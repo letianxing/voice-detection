@@ -1,0 +1,59 @@
+{
+  "profiles": [
+    {
+      "id": "mac_builtin",
+      "label": "Mac built-in microphone",
+      "sample_rate_hz": 48000,
+      "input_channels": 1,
+      "preferred_block_ms": 20,
+      "supports_doa": false,
+      "supports_raw_multichannel": false,
+      "notes": "Good for VAD/ASR and local testing; not enough for reliable cocktail-party DOA."
+    },
+    {
+      "id": "windows_wasapi_builtin",
+      "label": "Windows WASAPI default microphone",
+      "sample_rate_hz": 48000,
+      "input_channels": 1,
+      "preferred_block_ms": 20,
+      "supports_doa": false,
+      "supports_raw_multichannel": false,
+      "notes": "Use for single-user VAD/ASR smoke tests."
+    },
+    {
+      "id": "sipeed_6_plus_1_usb_array",
+      "label": "Sipeed 6+1 Mic Array USB",
+      "sample_rate_hz": 48000,
+      "input_channels": 8,
+      "doa_channel_indices": [0, 1, 2, 3, 4, 5],
+      "mic_positions_m": [
+        [0.035, 0.0, 0.0],
+        [0.0175, 0.03031, 0.0],
+        [-0.0175, 0.03031, 0.0],
+        [-0.035, 0.0, 0.0],
+        [-0.0175, -0.03031, 0.0],
+        [0.0175, -0.03031, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0]
+      ],
+      "preferred_block_ms": 20,
+      "supports_doa": true,
+      "supports_raw_multichannel": true,
+      "hardware_beam_channel_index": 6,
+      "reference_channel_index": 7,
+      "notes": "Official MA-USB8 docs expose 8ch S16_LE 48kHz: CH0-CH5 raw outer ring PCM, CH6 board beam/average output, CH7 raw/reference candidate. Verify physical channel order and CH7 role before production; geometry assumes 6 outer microphones on a 35 mm ring."
+    },
+    {
+      "id": "reachy_mini_native",
+      "label": "Reachy Mini native audio",
+      "sample_rate_hz": 48000,
+      "input_channels": 4,
+      "preferred_block_ms": 20,
+      "supports_doa": true,
+      "supports_raw_multichannel": true,
+      "hardware_beam_channel_index": null,
+      "reference_channel_index": null,
+      "notes": "Use the official media stack when running on the robot; default AEC and DOA are available in the platform stack."
+    }
+  ]
+}
