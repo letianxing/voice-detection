@@ -41,7 +41,8 @@
       "supports_raw_multichannel": true,
       "hardware_beam_channel_index": 6,
       "reference_channel_index": 7,
-      "notes": "Official MA-USB8 docs expose 8ch S16_LE 48kHz: CH0-CH5 raw outer ring PCM, CH6 board beam/average output, CH7 raw/reference candidate. Verify physical channel order and CH7 role before production; geometry assumes 6 outer microphones on a 35 mm ring."
+      "speech_peak_dbfs": -40.5,
+      "notes": "speech_peak_dbfs 取自 2026-09-16 现场会话：267 帧里最响的一帧 -40.5 dBFS，噪声底约 -61，说话人在正常工作距离。这是这块板子这一次的实测值，不是标定过的声压级，换增益或换距离要重测。Official MA-USB8 docs expose 8ch S16_LE 48kHz: CH0-CH5 raw outer ring PCM, CH6 board beam/average output, CH7 raw/reference candidate. Verify physical channel order and CH7 role before production; geometry assumes 6 outer microphones on a 35 mm ring."
     },
     {
       "id": "reachy_mini_native",

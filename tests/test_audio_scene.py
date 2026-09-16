@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from voice_detection.acoustic_reflex import AcousticReflex, LiveBeatDetector
+from voice_detection.acoustic_reflex import AcousticReflex, LiveBeatDetector, ReflexConfig, config_for_profile
 from voice_detection.audio_scene import estimate_tempo, summarize_scores
 
 
@@ -82,3 +82,40 @@ class ConservativeStartleTests(unittest.TestCase):
         self.assertEqual(reflex.update(-22,3000,None,0),[])
         reflex.update(-75,3020,None,0)
         self.assertEqual(reflex.update(-8,3040,None,0)[0]['kind'],'startle')
+
+
+class DeviceGainTests(unittest.TestCase):
+    """The absolute gates follow the level speech reaches on the device in use.
+
+    The Sipeed array records about 18 dB quieter than the built-in microphone, so
+    the same dBFS number means a different sound on each. A fixed gate has to be
+    wrong on one of them: the -12 dBFS one never fired on the array, and the -45
+    that replaced it made ordinary speech on any normal-gain microphone a startle.
+    """
+    def warmed(self, reflex, floor_dbfs):
+        for stamp in range(0, 3000, 20):
+            self.assertEqual(reflex.update(floor_dbfs, stamp, None, 0), [])
+        return reflex
+
+    def test_speech_on_a_quiet_array_is_not_a_startle_but_a_bang_is(self):
+        # 2026-09-16 field measurement: floor -61, loudest speech frame -40.5.
+        array = self.warmed(AcousticReflex(ReflexConfig(speech_peak_dbfs=-40.5)), -61)
+        self.assertEqual(array.update(-40.5, 3000, None, 0), [])
+        self.assertEqual(array.update(-25, 3020, None, 0)[0]['kind'], 'startle')
+
+    def test_the_same_level_is_only_speech_on_a_louder_device(self):
+        # -25 dBFS is a bang on the array and an ordinary sentence on this one,
+        # which is the whole reason the gate cannot be one number.
+        builtin = self.warmed(AcousticReflex(), -61)
+        self.assertEqual(builtin.update(-25, 3000, None, 0), [])
+        self.assertEqual(builtin.update(-6, 3020, None, 0)[0]['kind'], 'startle')
+
+    def test_profile_carries_the_measured_level_into_both_gates(self):
+        from voice_detection.profiles import get_profile
+        config = config_for_profile(get_profile('sipeed_6_plus_1_usb_array'))
+        self.assertAlmostEqual(config.speech_peak_dbfs, -40.5)
+        self.assertAlmostEqual(config.min_startle_dbfs, -30.5)
+        self.assertAlmostEqual(config.immediate_startle_dbfs, -24.5)
+        mac = config_for_profile(get_profile('mac_builtin'))
+        self.assertAlmostEqual(mac.min_startle_dbfs, -12.)
+        self.assertAlmostEqual(mac.immediate_startle_dbfs, -6.)

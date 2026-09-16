@@ -14,21 +14,53 @@ def _tuned(name, fallback):
         return float(fallback)
 
 
+# What a startle means is "louder than people are", not "loud in dBFS". The same
+# shout measures about -22 dBFS on the Mac microphone and -40.5 on the Sipeed
+# array, so every absolute gate is really a statement about one device's input
+# gain. The -12 dBFS floor was such a statement about a louder device: on the
+# array nothing in 267 field frames ever reached it and startle never fired.
+# Lowering it to -45 to match the array traded that for the opposite failure —
+# ordinary speech on a normal-gain microphone clears -45 easily and every
+# sentence after a silence became a startle. Both gates are now offsets from the
+# level speech actually reaches on the device in use, which is a number we can
+# measure per profile (MicrophoneProfile.speech_peak_dbfs).
+SPEECH_TO_STARTLE_DB = 10.
+SPEECH_TO_IMMEDIATE_DB = 16.
+DEFAULT_SPEECH_PEAK_DBFS = -22.
+
+
 @dataclass
 class ReflexConfig:
     warmup_ms: int = 2500
     startle_delta_db: float = _tuned('VOICE_STARTLE_DELTA_DB', 24.)
+    # The loudest level ordinary speech reaches on this microphone. Measured, not
+    # assumed: read rms_dbfs on 8090 while someone talks at working distance.
+    speech_peak_dbfs: float = _tuned('VOICE_SPEECH_PEAK_DBFS', DEFAULT_SPEECH_PEAK_DBFS)
     # A sanity floor only. The real discriminator is startle_delta_db, the rise
-    # above the adaptive noise baseline; this just stops a small noise in a very
-    # quiet room from qualifying on its ratio alone. It was -12 dBFS, which is
-    # 25 dB stricter than the rise test and so decided everything by itself: on
-    # the Sipeed array, whose floor measures about -61 dBFS with the loudest
-    # speech frame at -40.5, nothing ever reached it and startle never fired.
-    min_startle_dbfs: float = _tuned('VOICE_STARTLE_MIN_DBFS', -45.)
+    # above the adaptive noise baseline; this stops a small noise in a very quiet
+    # room from qualifying on its ratio alone. Defaults to speech peak + 10 dB.
+    min_startle_dbfs: float | None = None
+    # Above this the reflex stays fast; below it an impulse orients first and
+    # waits for classification. Defaults to speech peak + 16 dB.
+    immediate_startle_dbfs: float | None = None
     refractory_ms: int = 8000
     orient_delta_db: float = 8.
     orient_hold_ms: int = 120
     rear_boundary_deg: float = 100.
+
+    def __post_init__(self):
+        if self.min_startle_dbfs is None:
+            self.min_startle_dbfs = _tuned('VOICE_STARTLE_MIN_DBFS',
+                                           self.speech_peak_dbfs + SPEECH_TO_STARTLE_DB)
+        if self.immediate_startle_dbfs is None:
+            self.immediate_startle_dbfs = _tuned('VOICE_STARTLE_IMMEDIATE_DBFS',
+                                                 self.speech_peak_dbfs + SPEECH_TO_IMMEDIATE_DB)
+
+
+def config_for_profile(profile):
+    """Reflex thresholds for the microphone actually selected."""
+    peak = getattr(profile, 'speech_peak_dbfs', DEFAULT_SPEECH_PEAK_DBFS)
+    return ReflexConfig(speech_peak_dbfs=_tuned('VOICE_SPEECH_PEAK_DBFS', peak))
 
 
 class AcousticReflex:

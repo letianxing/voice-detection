@@ -25,6 +25,7 @@ def load_profiles(path: str | Path = DEFAULT_PROFILE_PATH) -> dict[str, Micropho
             supports_raw_multichannel=bool(item.get("supports_raw_multichannel", False)),
             hardware_beam_channel_index=optional_int(item.get("hardware_beam_channel_index")),
             reference_channel_index=optional_int(item.get("reference_channel_index")),
+            speech_peak_dbfs=float(item.get("speech_peak_dbfs", -22.0)),
             notes=item.get("notes", ""),
         )
         profiles[profile.id] = profile

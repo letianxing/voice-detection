@@ -19,6 +19,11 @@ class MicrophoneProfile:
     supports_raw_multichannel: bool = False
     hardware_beam_channel_index: Optional[int] = None
     reference_channel_index: Optional[int] = None
+    # Loudest level ordinary speech reaches on this device, measured from
+    # rms_dbfs at working distance. Input gain differs by tens of dB between
+    # devices, so the acoustic reflex takes its absolute gates from here rather
+    # than from full scale.
+    speech_peak_dbfs: float = -22.0
     notes: str = ""
 
 

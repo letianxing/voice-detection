@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 import numpy as np
-from .acoustic_reflex import AcousticReflex, LiveBeatDetector
+from .acoustic_reflex import AcousticReflex, LiveBeatDetector, config_for_profile
 from .audio_scene import DEFAULT_MODEL, classification_worker
 from .doa import estimate_azimuth_gcc, normalize_angle_deg
 from .bio_acoustics import BioAcoustics
@@ -35,7 +35,7 @@ class SceneRuntime:
         self.last_cough=-100000
         self.novelty_stamps=deque(maxlen=32)
         self.last_event_request=0
-        self.reflex = AcousticReflex()
+        self.reflex = AcousticReflex(config_for_profile(profile))
         self.beats = LiveBeatDetector()
         self.audio = deque(maxlen=500)
         self.events = deque(maxlen=256)
@@ -222,7 +222,7 @@ class SceneRuntime:
             for event in self.reflex.update(float(dbfs), stamp, self.direction, self.direction_confidence, echo, bool(music_valid and not (bio.get("novelty_onset") and bio.get("energy_z",0)>=8 and bio.get("spectral_flux",0)>=.5))):
                 # Non-extreme impulses orient first; semantic classification decides
                 # whether a cough or an alarming event occurred, rather than shouting at every cough.
-                if event.get("kind")=="startle" and raw_dbfs < -6:
+                if event.get("kind")=="startle" and raw_dbfs < self.reflex.config.immediate_startle_dbfs:
                     event.update(kind="orient",reason="impulse_pending_classification")
                 self._event(event)
             beat = self.beats.update(mono, stamp, bool(music_valid and music.get("bpm_valid")), music.get("bpm"), music.get("beat_anchor_ms"))
