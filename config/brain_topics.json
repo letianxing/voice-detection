@@ -1,0 +1,19 @@
+{
+  "voice_topic": "/voice_msg",
+  "voice_type": "std_msgs/msg/String",
+  "require_attention": true,
+  "attention_url": "http://127.0.0.1:8092/api/gates",
+  "direction_topic": "/sound_direction",
+  "direction_offset_deg": 90.0,
+  "direction_sign": 1.0,
+  "startle_topic": "/startle_trigger",
+  "orient_topic": "/rear_turn_trigger",
+  "music_state_topic": "/audio/music_state",
+  "music_genre_topic": "/music_genre",
+  "music_bpm_topic": "/music_bpm",
+  "music_beat_topic": "/audio/music_beat",
+  "state_topic": "/voice/perception_state",
+  "intent_topic": "/audio_intent_result",
+  "asr_partial_topic": "/voice/asr_partial",
+  "asr_final_topic": "/voice/asr_final"
+}

@@ -74,6 +74,16 @@ class UtteranceSegmenter:
             return None
         return self._finish(sample_rate_hz, stamp_ms + int(duration_ms))
 
+    @property
+    def active(self):
+        return bool(self._chunks)
+
+    def snapshot(self):
+        return {"active": self.active, "started_ms": self._started_ms, "track_id": self._track_id}
+
+    def stream_prefix(self):
+        return np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
+
     def flush(self, sample_rate_hz: int, stamp_ms: int) -> Utterance | None:
         return self._finish(sample_rate_hz, stamp_ms) if self._chunks else None
 
@@ -109,10 +119,12 @@ class AsrWorker:
         adapter: AsrAdapter | None,
         on_transcript: Callable[[SpeechTranscript], None],
         on_error: Callable[[str], None] | None = None,
+        audio_preprocessor: Callable[[np.ndarray, int], np.ndarray] | None = None,
     ):
         self.adapter = adapter or NullAsrAdapter()
         self.on_transcript = on_transcript
         self.on_error = on_error or (lambda _error: None)
+        self.audio_preprocessor = audio_preprocessor
         self.items: queue.Queue[Utterance] = queue.Queue(maxsize=4)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="asr-worker", daemon=True)
@@ -137,12 +149,15 @@ class AsrWorker:
             except queue.Empty:
                 continue
             try:
+                samples = utterance.samples
+                if self.audio_preprocessor is not None:
+                    samples = self.audio_preprocessor(samples, utterance.sample_rate_hz)
                 result = self.adapter.transcribe(
                     utterance.track_id,
-                    utterance.samples,
+                    samples,
                     utterance.sample_rate_hz,
                 )
-                if result is not None:
+                if result is not None and not self.stop_event.is_set():
                     self.on_transcript(
                         replace(
                             result,
@@ -152,4 +167,5 @@ class AsrWorker:
                         )
                     )
             except Exception as exc:
-                self.on_error(str(exc))
+                if not self.stop_event.is_set():
+                    self.on_error(str(exc))

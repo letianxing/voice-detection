@@ -50,4 +50,9 @@ def acoustic_track_to_attention_json(track: AcousticTrack) -> dict[str, object]:
         "self_echo_probability": track.self_echo_probability,
         "speaker_label": track.speaker_label,
         "speaker_similarity": track.speaker_similarity,
+        "target_speaker_probability": track.target_speaker_probability,
+        "tse_enabled": track.tse_enabled,
+        "tse_healthy": track.tse_healthy,
+        "tse_latency_ms": track.tse_latency_ms,
+        "target_speech_rejected": track.target_speech_rejected,
     }

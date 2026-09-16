@@ -49,7 +49,8 @@ def audio_msg_from_acoustic_track(track: AcousticTrack) -> dict[str, Any]:
         "role": "unknown",
         "asr_text": text,
         "emotion": "neutral",
-        "angle": float(track.azimuth_deg or 0.0),
+        "angle": float(track.azimuth_deg) if track.azimuth_deg is not None else None,
+        "angle_valid": track.azimuth_deg is not None,
         "speaker_vector": [],
     }
 

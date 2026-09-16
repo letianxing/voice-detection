@@ -7,6 +7,7 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 live = ["sounddevice>=0.4", "sherpa-onnx>=1.13.8"]
+scene = ["einops>=0.6", "scipy>=1.10", "librosa>=0.10", "torch>=2.6", "torchaudio>=2.6", "transformers>=4.40", "huggingface-hub>=0.25", "websocket-client>=1.7"]
 ros = ["rclpy"]
 
 [tool.setuptools]

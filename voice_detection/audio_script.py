@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Iterator, Mapping
 
 
-DEFAULT_MESSAGE_TYPE = "voice_service/msg/AudioMsg"
+DEFAULT_MESSAGE_TYPE = "audio_msgs/msg/AudioMsg"
 DEFAULT_TOPIC_NAME = "/voice_msg_speaker"
 _CONTROL_KEYS = {"count", "message", "payload", "period_sec", "rate_hz"}
 

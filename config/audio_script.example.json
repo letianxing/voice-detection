@@ -1,6 +1,6 @@
 {
   "topic_name": "/voice_msg_speaker",
-  "message_type": "voice_service/msg/AudioMsg",
+  "message_type": "audio_msgs/msg/AudioMsg",
   "loop": false,
   "steps": [
     {

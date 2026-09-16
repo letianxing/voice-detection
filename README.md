@@ -51,6 +51,13 @@ curl -X POST http://127.0.0.1:8090/api/enroll-speaker \
 `first_result_latency_ms` 与 `final_latency_ms`。8092 测试记录区同步显示这三个字段。
 因此可以把“VAD 已触发但 ASR 没 partial”与“partial 很快、只是端点静音等待较长”区分开。
 
+### 目标说话人 TSE（SpeakerBeam）
+
+8090 的 `Cocktail mode` 可选择 `SpeakerBeam TSE` 或 `Auto overlap switch`。当前后端使用 REAL-TSE 的
+`spk_emb_causal_100`（192D speaker embedding、causal BSRNN）；它在最终 utterance 的 ASR worker 中提取已注册目标人的语音，
+然后交给 Sherpa，失败时自动回退到 Baseline DOA/BF。模型位于 `weights/real-tse/pretrained/spk_emb_causal_100/`，
+注册说话人后参考音频保存到 `config/speaker_references/target.wav`。状态接口中的 `tse_backend` 和 `last_tse` 可用于记录实际是否启用。
+
 ## 快速验证
 
 ```bash
@@ -233,3 +240,11 @@ python -m voice_detection.cli run-live-remote \
 - `voice_detection/aec.py`：播放参考时间对齐、后台 JSONL 接入和轻量 AEC。
 - `scripts/local_voice_dashboard.py`：设备选择和实时声学可视化界面。
 - `scripts/tts_aec_reference_bridge.py`：`/tts_service/tts_audio` 到 AEC 参考流的 ROS2 桥。
+
+## 声学反射、音乐与正式大脑兼容
+
+新增异步音乐/曲风分类、BPM、节拍、独立声学反射与ROS2发布。安装、topic、坐标约定及正式大脑修复见 [AUDIO_CAPABILITIES.md](docs/AUDIO_CAPABILITIES.md)。默认通过注意力门控后才向正式大脑发送ASR/意图；旁人转写仍供原有记忆链路使用。
+
+## 仿生打断增量（2026-09-15）
+
+加入BioAcoustics、VAP轮次预测、实际PCM淡出和语义声音事件。VAP模型安装：`python scripts/setup_vap.py`；离线联调：`python scripts/verify_bio_integration.py`（加载模型，无音频设备采集）。VAP只辅助已放行的对话，不单独触发打断。完整交接见[AGENTS.md](AGENTS.md)。

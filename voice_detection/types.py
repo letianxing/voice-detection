@@ -80,9 +80,15 @@ class AcousticTrack:
     self_echo_probability: float = 0.0
     speaker_label: str = "unknown"
     speaker_similarity: float = 0.0
+    target_speaker_probability: float = 1.0
+    tse_enabled: bool = False
+    tse_healthy: bool = True
+    tse_latency_ms: float = 0.0
+    target_speech_rejected: bool = False
     speaker_embedding: tuple[float, ...] | None = None
     features: AudioFeatures | None = None
     transcript: SpeechTranscript | None = None
+    raw_echo_probability: float = 0.0
 
     def to_json_dict(self) -> dict[str, Any]:
         data = asdict(self)

@@ -43,7 +43,7 @@ class CocktailFrontend:
         # particular, do not switch channels or alter gain independently for
         # every 20 ms block: both operations move the adaptive VAD noise floor
         # and change the waveform presented to ASR.
-        raw_mono = mixdown(samples)
+        raw_mono = mixdown(samples, self.profile.doa_channel_indices or None)
         pre_vad = self.pre_vad.process(raw_mono)
 
         azimuth_deg = None
@@ -68,8 +68,9 @@ class CocktailFrontend:
             )
         else:
             spatial_audio = raw_mono
-        self_echo = estimate_self_echo_probability(spatial_audio, playback_reference)
+        raw_echo = estimate_self_echo_probability(spatial_audio, playback_reference)
         echo_cancelled = self.echo_canceller.process(spatial_audio, playback_reference)
+        self_echo = estimate_self_echo_probability(echo_cancelled, playback_reference)
         target_audio = self.noise_suppressor.process(echo_cancelled, pre_vad.active)
         vad = self.post_vad.process(target_audio)
         clarity = estimate_clarity_from_snr(vad.snr_db)
@@ -89,6 +90,7 @@ class CocktailFrontend:
                     azimuth_deg=azimuth_deg,
                     overlap_probability=overlap,
                     self_echo_probability=self_echo,
+                    raw_echo_probability=raw_echo,
                     features=features,
                 ),
             )

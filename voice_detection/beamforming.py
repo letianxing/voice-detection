@@ -16,7 +16,9 @@ def mixdown(samples: np.ndarray, channel_indices: Iterable[int] | None = None) -
         indices = tuple(int(index) for index in channel_indices)
         if indices:
             data = data[:, indices]
-    return np.mean(data, axis=1)
+    live = np.any(np.abs(data) > 1e-9, axis=0)
+    # Digital-zero channels must not attenuate a usable microphone by 8x.
+    return np.mean(data[:, live], axis=1) if np.any(live) else np.zeros(data.shape[0], dtype=np.float32)
 
 
 def delay_and_sum(

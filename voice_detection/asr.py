@@ -5,6 +5,7 @@ import multiprocessing as mp
 import queue
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 from dataclasses import asdict, dataclass, field
@@ -85,9 +86,21 @@ class SherpaZipformerAsrAdapter(AsrAdapter):
             raise RuntimeError(f"Sherpa model files not found: {root}")
         self.model_dir = str(root)
         self.language = language
+        self.engine = None
 
     def create_stream(self, track_id: str, sample_rate_hz: int):
-        return SherpaProcessStreamingSession(self.model_dir, track_id, sample_rate_hz, self.language)
+        self.warmup()
+        return self.engine.session(track_id, self.language)
+
+    def warmup(self):
+        if self.engine is None:
+            from .persistent_asr import SherpaEngine
+            self.engine = SherpaEngine(self.model_dir)
+
+    def close(self):
+        if self.engine is not None:
+            self.engine.close()
+            self.engine = None
 
     def transcribe(self, track_id: str, audio: np.ndarray, sample_rate_hz: int) -> SpeechTranscript | None:
         session = self.create_stream(track_id, sample_rate_hz)
@@ -107,6 +120,8 @@ class SherpaProcessStreamingSession:
         self.process = ctx.Process(target=_sherpa_worker, args=(model_dir, self.commands, self.results), daemon=True)
         self.process.start()
         self.last_partial = ""
+        self._close_lock = threading.Lock()
+        self._closed = False
         self.pending_audio = np.zeros(0, dtype=np.float32)
 
     def accept(self, audio: np.ndarray, sample_rate_hz: int, stamp_ms: int) -> str:
@@ -136,26 +151,40 @@ class SherpaProcessStreamingSession:
         return self.last_partial
 
     def finish(self, ended_ms: int) -> SpeechTranscript | None:
+        value = ""
         try:
             if self.pending_audio.size:
-                self.commands.put(("accept", self.pending_audio.copy()), timeout=0.2)
+                self.commands.put(("accept", self.pending_audio.copy()), timeout=.2)
                 self.pending_audio = np.zeros(0, dtype=np.float32)
-                self.results.get(timeout=10.0)
-            self.commands.put(("finish", None), timeout=0.2)
-            value = ""
-            deadline = time.monotonic() + 10.0
+            self.commands.put(("finish", None), timeout=.2)
+            deadline = time.monotonic() + 10.
             while time.monotonic() < deadline:
-                kind, value = self.results.get(timeout=max(0.1, deadline - time.monotonic()))
+                kind, candidate = self.results.get(timeout=max(.1, deadline - time.monotonic()))
                 if kind == "final":
+                    value = str(candidate or "")
                     break
-        except queue.Empty:
+        except (queue.Empty, queue.Full, OSError, ValueError, EOFError):
             value = ""
-        self.process.join(timeout=0.5)
-        if self.process.is_alive(): self.process.terminate()
-        text = str(value or "").replace(" ", "").strip()
-        if not text: return None
+        finally:
+            self.close()
+        text = value.replace(" ", "").strip()
+        if not text:
+            return None
         return SpeechTranscript(track_id=self.track_id, text=text, is_final=True, language=self.language,
-                                confidence=0.0, started_ms=self.started_ms, ended_ms=ended_ms)
+                                confidence=0., started_ms=self.started_ms, ended_ms=ended_ms)
+
+    def close(self):
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.process.join(timeout=.1)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=.5)
+            for channel in (self.commands, self.results):
+                channel.cancel_join_thread()
+                channel.close()
 
 
 def _sherpa_worker(model_dir: str, commands, results) -> None:

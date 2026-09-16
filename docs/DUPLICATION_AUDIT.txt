@@ -1,0 +1,19 @@
+代码重复性检查（2026-09-15）
+
+1. ~/Golands/robot-attention-perception/robot_attention_perception
+这是正常的Python源码包，外层是项目目录，内层是可import的包名；不是重复项目，已保留。
+同项目的include/robot_attention_perception是C++头文件命名空间目录，也不是需要删除的副本。
+
+2. ~/Golands/voice-detection/robot_attention_perception
+实际是一个空目录，不含源码，也不是软链接。它导致从Voice目录使用共享venv导入robot_attention_perception时得到namespace package（__file__=None），遮挡正确包。
+已用rmdir删除空目录（仅空目录可删除）。删除后import定位到：
+/Users/letianxing/Golands/robot-attention-perception/robot_attention_perception/__init__.py
+没有删除任何有内容的源文件。
+
+3. 六项目源码完全重复检查
+对voice、vision、attention、brain-test、hri-memory、robo-model扫描了224个大于等于200字节的.py/.go/.rs/.cpp/.hpp/.h/.sh源码文件，按SHA256分组，没有发现内容完全相同的文件组。
+排除了第三方vendor/third_party、模型权重、build/target/install、虚拟环境、node_modules、缓存与数据目录。
+这项检查证明该范围内没有整文件完全拷贝，不等于不存在相似逻辑。Python与C++算法后端、ROS传输适配、旧Attention独立S2S属于不同实现/兼容用途，未因相似名字删除。
+
+4. 新增ROS消息包
+没有在Voice或Attention仓库拷贝第二份audio_msgs源码。Docker构建用additional_contexts引用pacific-rim中已有的audio_msgs包，编译产物只存在于镜像内。

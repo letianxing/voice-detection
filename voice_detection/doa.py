@@ -52,6 +52,13 @@ def estimate_azimuth_gcc(
     if len(indices) < 2 or positions.shape[0] <= max(indices):
         return DoaEstimate(azimuth_deg=None, confidence=0.0, pair_count=0)
 
+    if max(indices) >= data.shape[1]:
+        return DoaEstimate(None, 0.0, 0)
+    rms = np.sqrt(np.mean((data[:, indices]-data[:, indices].mean(axis=0))**2, axis=0))
+    active = rms > max(1e-6, float(rms.max())*.01)
+    # Missing raw channels cannot produce a physically meaningful bearing.
+    if not np.all(active):
+        return DoaEstimate(None, 0.0, 0)
     measured: list[tuple[int, int, float]] = []
     for pos, left in enumerate(indices):
         for right in indices[pos + 1 :]:

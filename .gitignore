@@ -9,3 +9,6 @@ models/*.onnx
 models/*.bin
 config/speaker_profiles.json
 .venv*/
+
+config/brain_speaker_ids.json
+config/brain_speaker_ids.tmp
