@@ -3,7 +3,7 @@
 ## 工作规则与实际部署
 - 用户授权跨六项目协作；大量未提交实现不可擅自清理或回滚。不创建子代理，除非用户明确要求。
 - 修改前检查并停止本机受管服务，不擅自打开摄像头/麦克风或播放。远端162的Qwen为常驻服务，不能随本机stop_all误停。
-- 机器人名称“小艾克斯”。用户要求自然多人对话、旁人记忆、视听身份、注意力约束打断、主动搭话。声纹/视觉冲突优先可靠声纹归属发言，不据此改写冲突人脸。
+- 机器人名称“小圆”。用户要求自然多人对话、旁人记忆、视听身份、注意力约束打断、主动搭话。声纹/视觉冲突优先可靠声纹归属发言，不据此改写冲突人脸。
 - 本机启动：cd ~/Golands/biomimetic-brain-test && bash scripts/start_all.sh；停止：bash scripts/stop_all.sh；状态：python3 scripts/mac_stack.py status。
 - Python：~/Golands/robot-attention-perception/.venv-mac/bin/python。MediaPipe固定0.10.32，不盲目升级。
 - 端口：Vision8080、Voice8090、Attention8092、Brain8094、Memory8788、ROS9090；慢脑http://172.16.60.162:18050/v1/chat/completions，model=qwen3.5-9b。
@@ -32,13 +32,13 @@
 <!-- CURRENT_PROJECT_SUMMARY_END -->
 
 # 历史记录（上方最新状态优先）
-# 小艾克斯仿生交互系统：任务交接
+# 小圆仿生交互系统：任务交接
 
 更新时间：2026-09-15。新会话先读本文件，勿把单元测试通过描述为现场准确率达标。
 
 ## 用户目标与工作规则
 - 六项目：voice-detection、vision-detection、robot-attention-perception、hri-memory-service、biomimetic-brain-test、robo-model；均在 ~/Golands。
-- 用户要日常视听注意力、身份/记忆归属、实时S2S、注意力约束的打断、主人主动搭话。机器人叫“小艾克斯”。
+- 用户要日常视听注意力、身份/记忆归属、实时S2S、注意力约束的打断、主人主动搭话。机器人叫“小圆”。
 - 用户要求修改前停服务。目前全部服务已停，不要擅自启动摄像头/麦克风或自动播放。
 - 不清理或回滚现有未提交更改；此前大量实现未提交。不得声称全部功能已经完成。
 - 不创建子代理，除非用户明确要求。
@@ -55,7 +55,7 @@
 
 ## 已实现
 ### 身份、记忆
-- 用户面对镜头说“你好小艾克斯，我叫小天，请记住我，我是你的主人”自动注册；不需要页面操作。普通熟人去掉主人声明。
+- 用户面对镜头说“你好小圆，我叫小天，请记住我，我是你的主人”自动注册；不需要页面操作。普通熟人去掉主人声明。
 - CampPlus两段声纹一致性预检(.6)，SFace连续5帧+2帧唇动+模板一致性(.7)预检；先预检两边再提交，部分失败有提示，非跨服务事务。
 - 陌生声纹满足时长/清晰/非回声条件建立stranger编号；正式登记保留别名。原始匹配阈值声纹.48、人脸.38，未进行现场ROC校准。
 - 声纹与视觉冲突优先可靠声纹归属发言；标记identity_conflict和visual_person_id，不改写冲突人脸。已移除“唯一可见人就用声音给脸改名”的捷径。
@@ -503,3 +503,27 @@ scripts/download_models.sh 原来把模型下到 models/，但代码全部在 we
 新增 SenseVoiceFinalPassTest（缺模型在构造时就报错、不提供 create_stream 以免顶替 partial、真实模型转写一句）。
 dashboard 里 SenseVoice + 仅 Vosk（无 whisper 命令）时原本拿不到 partial，已补。
 验证：voice-detection 79 项、biomimetic-brain-test 72 项、python3 scripts/mac_stack.py check 全过；未开摄像头/麦克风/播放。
+
+## 现场三个故障的定位与修复（2026-09-16，最新）
+用户接上硬件实测后报了三件事：陌生人一直被记成说了「.」、惊跳太频繁、TTS 回复时 LLM 报错。
+证据取自 hri-memory 的 events.jsonl 与 .run/attention-decisions.jsonl，不是猜的。
+
+1) 「.」是 SenseVoice 带来的。它会标点，所以一段呼吸或环境噪声不再返回空串，而是返回「。」，
+   非空文本足以开一条 utterance、建一个陌生人、写一条记忆——现场 21 条最常见的 heard 文本就是「。」。
+   更糟的是它不止返回标点：两秒合成噪声上它稳定返回「我。」（有用例固定这个事实），
+   所以只加「有没有实际字符」的检查不够。
+   修复两层：has_spoken_content() 去掉标点与 <|tag|> 后要求有字母数字或汉字；
+   以及 offline_pass_is_corroborated()——流式模型在同一段音频上没听出词，就不跑离线复读。
+   代价写清楚：流式模型漏掉、只有 SenseVoice 听出来的那句会被一起丢掉。
+   驱动轮次与打断的本来就是流式模型，它没反应时机器人本来也没反应。
+2) 惊跳太频繁是上一轮 -45 dBFS 兜底的直接后果，现场 4 次惊跳的 delta 是 48–58 dB，
+   即「安静房间里正常说一句话」。已在本项目上一个提交改成按设备语音峰值推门限（见上一节），
+   Mac 内置麦恢复 -12/-6。这一条不需要再改代码，重启即可生效。
+3) LLM 报错是 brain 的事，记在 biomimetic-brain-test/AGENTS.md：
+   远端 llama-server n_ctx=4096，现场请求到 4622 和 5901 token，服务端直接 400，整轮回复没了。
+
+机器人名字按用户要求从「小艾克斯」改为「小圆」。代码里名字出现在四处正则/名单
+（brain_topics、core、registration/runtime、interaction_intent/turn_taking/linguistic_context/fusion），
+一并加了同音写法「小园」「小元」：识别器把名字写成同音字的概率不低，叫不动机器人比偶尔误触更糟；
+如果以后有人真叫小园/小元，把这两个变体删掉即可。config/speaker_profiles.json 里的登记原话是用户数据，没有改。
+验证：voice 82、brain 75、attention 182、vision 27、离线端到端九场景全过；未开摄像头/麦克风/播放。

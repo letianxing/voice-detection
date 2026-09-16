@@ -5,7 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_detection.asr import AsrScenarioRecord, SherpaSenseVoiceAsrAdapter, resample_mono
+from voice_detection.asr import (AsrScenarioRecord, SherpaSenseVoiceAsrAdapter, has_spoken_content,
+                                 offline_pass_is_corroborated, resample_mono)
 from voice_detection.types import SpeechTranscript
 
 SENSEVOICE_DIR = Path(__file__).resolve().parents[1] / "weights" / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
@@ -60,6 +61,34 @@ class SenseVoiceFinalPassTest(unittest.TestCase):
         # The dashboard picks the streaming recogniser by this attribute; if the
         # offline model ever grew one it would silently take over the partials.
         self.assertFalse(hasattr(SherpaSenseVoiceAsrAdapter, "create_stream"))
+
+    def test_punctuation_alone_is_not_an_utterance(self):
+        # The field session recorded 21 of these as things a stranger said.
+        for empty in ("。", ".", " 。 ", "，。！？", "<|zh|><|NEUTRAL|><|Speech|>", ""):
+            self.assertFalse(has_spoken_content(empty), empty)
+        for spoken in ("嗯。", "喂", "小圆", "ok", "早上9点。"):
+            self.assertTrue(has_spoken_content(spoken), spoken)
+
+    def test_offline_pass_needs_the_streaming_model_to_have_heard_words(self):
+        heard = SpeechTranscript(track_id="voice_1", text="今天天气怎么样", is_final=True, language="zh-CN")
+        blank = SpeechTranscript(track_id="voice_1", text="   ", is_final=True, language="zh-CN")
+
+        self.assertTrue(offline_pass_is_corroborated(heard))
+        self.assertFalse(offline_pass_is_corroborated(blank))
+        self.assertFalse(offline_pass_is_corroborated(None))
+
+    @unittest.skipUnless(SENSEVOICE_DIR.is_dir(), "SenseVoice model not downloaded")
+    def test_room_noise_makes_the_offline_model_invent_a_word(self):
+        # Why the corroboration rule exists: on noise the offline model answers
+        # with a word, so the content check alone does not keep junk out.
+        adapter = SherpaSenseVoiceAsrAdapter(SENSEVOICE_DIR)
+        quiet = (np.random.default_rng(7).normal(0, 0.0005, 16000 * 2)).astype(np.float32)
+
+        invented = adapter.transcribe("voice_1", quiet, 16000)
+
+        self.assertIsNotNone(invented)
+        self.assertLessEqual(len(invented.text), 3)
+        self.assertFalse(offline_pass_is_corroborated(None))
 
     @unittest.skipUnless(SENSEVOICE_DIR.is_dir(), "SenseVoice model not downloaded")
     def test_transcribes_a_finished_chinese_utterance(self):

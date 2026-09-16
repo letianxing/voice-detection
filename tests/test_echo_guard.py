@@ -12,4 +12,4 @@ class EchoTests(unittest.TestCase):
     def test_later_repetition_and_independent_speaker_are_not_echo(self):
         self.assertIsNone(match_playback('继续聊之前公园的话题',5000,6000,self.records))
         self.assertIsNone(match_playback('继续聊之前公园的话题',1200,3100,self.records,.9))
-        self.assertIsNone(match_playback('小艾克斯，停一下，我有问题',1200,3000,self.records))
+        self.assertIsNone(match_playback('小圆，停一下，我有问题',1200,3000,self.records))

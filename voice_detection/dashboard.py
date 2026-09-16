@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .frontend import CocktailFrontend, now_ms
 from .asr import (ExternalCommandAsrAdapter, NullAsrAdapter, SherpaSenseVoiceAsrAdapter,
-                  SherpaZipformerAsrAdapter, VoskAsrAdapter, write_wav)
+                  SherpaZipformerAsrAdapter, VoskAsrAdapter, offline_pass_is_corroborated, write_wav)
 from .io import list_sounddevice_devices
 from .profiles import get_profile, load_profiles
 from .ros4hri import acoustic_track_to_ros4hri_json
@@ -477,6 +477,9 @@ class LiveMonitor:
                 self._on_transcript(streamed_final)
                 return
         if asr_worker is not None and generation == self._capture_generation:
+            if (isinstance(self._asr_adapter, SherpaSenseVoiceAsrAdapter) and stream is not None
+                    and not offline_pass_is_corroborated(streamed_final)):
+                return
             asr_worker.submit(utterance)
 
     def stop(self) -> None:

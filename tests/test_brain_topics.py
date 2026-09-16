@@ -56,6 +56,8 @@ class TopicTests(unittest.TestCase):
 class IntentTests(unittest.TestCase):
     def test_only_exact_commands_are_explicit_intents(self):
         from voice_detection.brain_topics import explicit_intent
-        self.assertEqual(explicit_intent('小艾克斯，跟着我'), 'follow')
+        self.assertEqual(explicit_intent('小圆，跟着我'), 'follow')
+        self.assertEqual(explicit_intent('小园，跟着我'), 'follow')  # 同音误识也要能去掉称呼
+        self.assertEqual(explicit_intent('小元，跟着我'), 'follow')
         self.assertEqual(explicit_intent('停止跟随'), 'stop')
         self.assertIsNone(explicit_intent('他说让你跟着我，你觉得呢？'))

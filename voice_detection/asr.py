@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -109,6 +110,33 @@ class SherpaZipformerAsrAdapter(AsrAdapter):
         return result
 
 
+def has_spoken_content(text: str) -> bool:
+    """Did anyone actually say a word, or is this only punctuation?
+
+    SenseVoice punctuates, so a segment of breath or room noise comes back as
+    "。" instead of the empty string the streaming model returns. Non-empty text
+    is enough to open an utterance, name a stranger and write a memory, which is
+    how a field session ended up with 21 recorded utterances whose entire content
+    was a full stop. Tags like <|zh|><|NEUTRAL|> are metadata, not speech.
+    """
+    stripped = re.sub(r"<\|[^|]*\|>", "", str(text or ""))
+    return any(character.isalnum() for character in stripped)
+
+
+def offline_pass_is_corroborated(streamed_final) -> bool:
+    """Did the streaming recogniser hear words in this same segment?
+
+    The offline pass re-reads audio the streaming model has already decoded. On
+    room noise SenseVoice does not return nothing — it returns a plausible short
+    word ("我。" on two seconds of synthetic noise, and the field session logged
+    exactly that). The streaming model is the one whose partials drive turn-taking
+    on this segment, so if it found no words the robot never reacted to a turn
+    either, and a second opinion inventing one only creates a stranger and a
+    memory. Costs us an utterance the weaker streaming model missed entirely.
+    """
+    return streamed_final is not None and bool(str(streamed_final.text or "").strip())
+
+
 class SherpaSenseVoiceAsrAdapter(AsrAdapter):
     """Offline SenseVoice for the finished sentence only.
 
@@ -151,7 +179,7 @@ class SherpaSenseVoiceAsrAdapter(AsrAdapter):
         stream.accept_waveform(sample_rate_hz, samples)
         self.recognizer.decode_stream(stream)
         text = str(stream.result.text or "").strip()
-        if not text:
+        if not has_spoken_content(text):
             return None
         return SpeechTranscript(track_id=track_id, text=text, is_final=True,
                                 language=self.language, clarity=1.0, confidence=1.0)
