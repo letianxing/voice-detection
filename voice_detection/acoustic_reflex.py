@@ -1,15 +1,30 @@
 """Frame-rate acoustic reflexes, independent of ASR and the LLM."""
+import os
 from collections import deque
 from dataclasses import dataclass
 import math
 import numpy as np
 
 
+def _tuned(name, fallback):
+    """Field-tunable without a code change; measured defaults are for the Sipeed array."""
+    try:
+        return float(os.environ.get(name, fallback))
+    except ValueError:
+        return float(fallback)
+
+
 @dataclass
 class ReflexConfig:
     warmup_ms: int = 2500
-    startle_delta_db: float = 24.
-    min_startle_dbfs: float = -12.
+    startle_delta_db: float = _tuned('VOICE_STARTLE_DELTA_DB', 24.)
+    # A sanity floor only. The real discriminator is startle_delta_db, the rise
+    # above the adaptive noise baseline; this just stops a small noise in a very
+    # quiet room from qualifying on its ratio alone. It was -12 dBFS, which is
+    # 25 dB stricter than the rise test and so decided everything by itself: on
+    # the Sipeed array, whose floor measures about -61 dBFS with the loudest
+    # speech frame at -40.5, nothing ever reached it and startle never fired.
+    min_startle_dbfs: float = _tuned('VOICE_STARTLE_MIN_DBFS', -45.)
     refractory_ms: int = 8000
     orient_delta_db: float = 8.
     orient_hold_ms: int = 120
