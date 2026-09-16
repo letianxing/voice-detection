@@ -24,7 +24,28 @@ SSH user@172.16.60.162；密码不写入交接文档。systemd用户服务robo-q
 - 千问自主解释语境，不要新增“你说呢->最后一句”的场景硬编码。默认温柔短答，复杂比较总结允许完整1–2句。
 - 插拔视听、记忆上下文、内部状态；当前没有内部状态也能正常工作，缺失明确标注，不造内部情绪数值。
 
-## 最新实现（2026-09-16 第四轮：统一订阅点 + v2 算法 + 换识别模型）
+## 最新实现（2026-09-16 第五轮：按理论链补齐剩余缺口）
+1) 归一化池跨模态耦合（v2）：pool = 本模态 + 0.35 × 另一模态。视觉与听觉之前各自归一化，
+   意味着「很显眼的人」和「很响的声音」从不真正竞争有限注意资源；现在会。视听仍各保留独立焦点。
+2) Global Workspace 升级为认知层竞争：soft-WTA(share=a²/Σa²) + 有限容量 4 +
+   urgency≥0.7 越过容量直接进入（惊跳走这条），其余标 suppressed_over_capacity。
+   非感知候选在这里竞争，因为它们没有模态——插件决定「看哪听哪」，工作区决定「什么值得大脑处理」。
+3) Memory → Attention（内源性注意）：memory_candidates.py。按用户选择做保守版：
+   只提 Brain 明确未完成的事（过期未被回答的问题），同一件只提一次、每 5 分钟最多一次、
+   相关的那个人必须在场、必须安静 3 秒、超过 30 分钟不再提。每次拒绝都记原因，可在 8092 看到。
+   只放候选进竞争，说不说仍由 Brain 决定。ATTENTION_MEMORY_EVENTS=0 整体关闭。
+   Brain 侧 ExpectedAnswer 现在记录过期未答的问题为 unfinished。
+4) Brain → Attention（top-down bias）：snapshot 的 attention_memory.goals
+   （awaiting_answer/holding_floor/deferred_turn/greet_owner，带 strength 与 expires_ms），
+   注意力转成该人的 importance。只偏置竞争，不授予听话许可，不能创造未观测到的人（有测试固定）。
+   Brain 另外订阅了 /attention/workspace 供追溯，行动通路仍是 /attention/brain_input，未改。
+5) 人脸走商用路线（用户已确认「先按商用做，同时留 arcface 开关」）：
+   默认 sface(Apache-2.0)，新增 face_quality() 质量门槛（尺寸/检测分/正脸度/清晰度，不过就不判断、
+   返回 unknown 并给原因）与 TemplateTracker（最近 5 帧合格嵌入取均值再匹配）。
+   这是用许可干净但较弱的后端把有效精度拿回来的主要手段。
+6) 8092 新增「全局工作区」面板：周期、容量占用、被压制项、订阅者与丢帧、记忆候选状态、联盟明细。
+
+## 上一轮实现（2026-09-16 第四轮：统一订阅点 + v2 算法 + 换识别模型）
 1) 统一订阅点 global_workspace.py：每个感知周期广播一份内容，供 Brain 和以后的系统消费。
    GET /api/workspace（最新+丢帧统计）、?since=N（回放，有界 64 条）、/api/workspace/stream（SSE）、
    ROS /attention/workspace。订阅者落后丢帧并计数，不阻塞感知循环。Brain 现有 brain_input 通路未动。
@@ -87,7 +108,8 @@ CompetitionAdapter 无内态时不制造 motivation；arousal 数学默认1只�
 当前 MacTTS 还未换成神经情绪音色；Qwen3-TTS Serena 已核实选型但未部署。pacific-rim tts_service 缺核心 tts_engine.py 且取消/结束契约不完整，不能宣称兼容替换完成。
 
 ## 关键验证
-本轮：Attention 151 项、Brain 62 项、Vision 16 项、C++ 4 个测试目标（核心 + v1/v2 同一套行为用例 + 抑制环）、8092 DOM 全部通过。
+本轮：Attention 164 项、Brain 62 项、Vision 23 项、C++ 4 个测试目标（核心 + v1/v2 同一套行为用例 + 抑制环）、8092 DOM 全部通过。
+另做了不开硬件的 runtime smoke：工作区广播 10 个周期、订阅推送、回放、干净退出。
 scripts/verify_attention_algorithm.py 用真实来源适配器 + 真实 .so + 真实融合跑九个离线场景（含关闭记忆来源的消融、跨会话熟悉度、识别不可靠三组对照），未开摄像头/麦克风/网络。
 python3 scripts/mac_stack.py check 通过，已含注意力算法 .so 预检（缺失只降级不阻断）。
 Voice最近73、Vision8、HRI6为较早各自相关变更的结果，不要说本轮全部重新跑过。
@@ -102,7 +124,11 @@ Voice最近73、Vision8、HRI6为较早各自相关变更的结果，不要说�
 1d. 跨会话熟悉度用的是「不同历史会话数」，4 个饱和为 1.0，是工程饱和点不是人类熟悉度阈值；未做现场标定。
 1e. 声纹已换 ERes2NetV2；人脸默认仍 sface，arcface 已下载待用途确认。两者阈值都未在真人数据上标定，
     换模型后必须真人重新登记（旧档案已清空，备份在 ~/Golands/.identity-backup-*）。
-1f. v2 算法与 v1 的现场优劣未比较；global_workspace 尚无真实消费者接入，只验证了广播与订阅本身。
+1f. v2 算法与 v1 的现场优劣未比较。工作区已被 Brain 订阅但 Brain 仍按 brain_input 行动；
+    真实消费者接线留给下一步。
+1g. 层级 Selective Tuning 未做，理由是候选空间扁平，硬套是空架子——不是遗漏。
+1h. 记忆候选目前只有一种来源（过期未答的问题）。话题联想式的「突然想起」需要相关性模型，没有，也没有假装有。
+1i. 人脸质量门槛的阈值（72px/0.85/40°/25）是工程起点，未在真人数据上标定。
 2. 任意人数逐字实时重叠分离；现multi仅完成语音段、最多4登记参考/12秒、独立身份验证。
 3. 完整人际听话人/代词指向模型、完整麦格克音素融合。
 4. 情绪神经TTS实际部署、流式首音频/取消/AEC兼容。现Tingting的温柔文本不等于情绪音色。

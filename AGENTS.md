@@ -296,3 +296,19 @@ Attention现在有视听/记忆/可选内部状态支持源；本项目既有感
   身份识别加 300ms 节流，按人脸位置缓存，身份本就不逐帧变化。
 - 旧声纹与人脸档案已按用户指示清空，备份在 ~/Golands/.identity-backup-*；必须真人重新登记。
 - 验证：Attention 151、Brain 62、Vision 16、C++ 4 个测试目标、DOM、九场景离线端到端全过；未开硬件。
+
+## 按理论链补齐统一注意力竞争（2026-09-16，最新）
+用户给出完整理论链并要求补齐。逐条核对后，真正缺的是三样，已补：
+- 跨模态竞争：v2 归一化池改为 本模态 + 0.35×另一模态。此前视听各自归一化，两个模态从不真正争夺有限注意资源。
+- Memory → Attention 内源性候选：memory_candidates.py。保守版（用户选择）：只提 Brain 明确未完成的事
+  （过期未被回答的问题），同一件只提一次、每 5 分钟最多一次、相关的人必须在场、必须安静 3 秒、30 分钟后不再提；
+  每次拒绝都记原因。只放候选进竞争，说不说仍由 Brain 决定。ATTENTION_MEMORY_EVENTS=0 可关。
+- Brain → Attention 目标通道：attention_memory.goals（awaiting_answer/holding_floor/deferred_turn/greet_owner）
+  转成该人的 importance，只偏置不放行、不能创造未观测到的人（有测试固定）。
+另补完两个半成品：
+- workspace 升级为认知层竞争：soft-WTA + 有限容量 4 + urgency≥0.7 抢占，非赢家标 suppressed_over_capacity。
+  非感知候选（记忆、惊跳）在这里竞争，因为它们没有模态。
+- 人脸商用路线：默认 sface + face_quality 质量门槛 + 5 帧模板均值。质量不过就返回 unknown 并给原因，不猜。
+明确不做：层级 Selective Tuning。候选空间是扁平的 person/track/object，没有 part-whole 层级，硬套是空架子。
+这是判断，不是遗漏；等以后真有层级结构再说。
+验证：Attention 164、Brain 62、Vision 23、C++ 4 个目标、DOM、九场景离线端到端、runtime smoke 全过；未开硬件。
