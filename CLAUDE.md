@@ -20,7 +20,7 @@
 - SpeakerBeam/REAL-TSE单目标提取；multi_speaker.py完成语音段后逐参考分离、身份验证、ASR，--tse multi显式实验模式，最多4份登记参考/段长12s，同段多人的utterance_id不同。缺参考或验证失败不强行归人；mixed_fallback只记忆不放行。
 - PlaybackEngine常驻音频流，Brain传PCM16。实际播放参考、回声文本/时间匹配、旧ID隔离。半余弦淡出：普通20ms、礼让40ms、停止10ms、惊跳5ms，非微秒保证。
 - BioAcoustics：相对背景突增、上升沿、谱通量、2–4kHz比例、30–150Hz调制、F0Hz/voicing/斜率/停顿。不是诊断焦虑或危险。
-- AST声音事件/音乐、十类genre、BPM与节拍；Cough/Sneeze分类。一般突变先定向分类，极强声保持快速反射；两档绝对门限由所选profile的speech_peak_dbfs推出（说话峰值+10/+16），不是写死的dBFS，Sipeed实测-40.5；语义alarm有窗口延迟。咳嗽分类去重，提供Brain关怀事件。
+- AST声音事件/音乐、十类genre、BPM与节拍；Cough/Sneeze分类。一般突变先定向分类，极强声保持快速反射；两档绝对门限由所选profile的speech_peak_dbfs推出（说话峰值+14/+16），不是写死的dBFS，Sipeed实测-40.5；听够语音后改用实测说话峰值自适应，上限-3dBFS；电平要连续40ms才算惊跳（依据惊跳文献的30-50ms刺激时长），单帧尖峰不算；语义alarm有窗口延迟。咳嗽分类去重，提供Brain关怀事件。
 - VAP官方权重，4秒AEC残差+实际TTS参考输入，MPS优先、独立有界worker；仅辅助轮次确认，未校准中文多人远场。
 - ROS话题发布、实时8090接口、模型耗时/健康信息。声纹池/API与分离数据可供Attention使用。
 

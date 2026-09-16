@@ -219,7 +219,7 @@ class SceneRuntime:
             if tone:self._event(tone)
             self.state_data["acoustic"] = acoustic
             self.direction_history.append(acoustic)
-            for event in self.reflex.update(float(dbfs), stamp, self.direction, self.direction_confidence, echo, bool(music_valid and not (bio.get("novelty_onset") and bio.get("energy_z",0)>=8 and bio.get("spectral_flux",0)>=.5))):
+            for event in self.reflex.update(float(dbfs), stamp, self.direction, self.direction_confidence, echo, bool(music_valid and not (bio.get("novelty_onset") and bio.get("energy_z",0)>=8 and bio.get("spectral_flux",0)>=.5)), speech=bool(context.get("vad_active"))):
                 # Non-extreme impulses orient first; semantic classification decides
                 # whether a cough or an alarming event occurred, rather than shouting at every cough.
                 if event.get("kind")=="startle" and raw_dbfs < self.reflex.config.immediate_startle_dbfs:

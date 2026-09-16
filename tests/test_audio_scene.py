@@ -13,12 +13,37 @@ class ReflexTests(unittest.TestCase):
 
     def test_loud_impulse_without_asr_triggers_once(self):
         reflex = self.warmed()
-        events = reflex.update(-8, 3000, None, 0)
+        # 40 ms of held level, as in the 30-50 ms bursts the startle literature
+        # uses; the first two frames alone are not a stimulus.
+        self.assertEqual(reflex.update(-8, 3000, None, 0), [])
+        self.assertEqual(reflex.update(-8, 3020, None, 0), [])
+        events = reflex.update(-8, 3040, None, 0)
         self.assertEqual(events[0]["kind"], "startle")
         self.assertFalse(events[0]["direction_valid"])
-        self.assertEqual(reflex.update(-8, 3020, None, 0), [])
-        reflex.update(-65, 3040, None, 0)
         self.assertEqual(reflex.update(-8, 3060, None, 0), [])
+        reflex.update(-65, 3080, None, 0)
+        for stamp in range(3100, 3200, 20):
+            self.assertEqual(reflex.update(-8, stamp, None, 0), [])  # refractory
+
+    def test_a_single_frame_spike_is_a_click_not_a_startle(self):
+        reflex = self.warmed()
+        for stamp in range(3000, 3400, 20):
+            spike = -6 if stamp % 200 == 0 else -65
+            self.assertEqual(reflex.update(spike, stamp, None, 0), [], stamp)
+
+    def test_the_bar_follows_how_loud_this_person_actually_is(self):
+        close = self.warmed()
+        for stamp in range(3000, 4000, 20):  # someone talking right at the mic
+            close.update(-12, stamp, None, 0, speech=True)
+        quiet = self.warmed()
+        for stamp in range(3000, 4000, 20):  # the same person, across the room
+            quiet.update(-30, stamp, None, 0, speech=True)
+        self.assertAlmostEqual(close.startle_floor(), -3.)   # 抬到设备上限
+        self.assertAlmostEqual(quiet.startle_floor(), -8.)   # 设备先验仍然兜底
+        bang = []
+        for stamp in range(5000, 5100, 20):
+            bang += close.update(-8, stamp, None, 0)
+        self.assertEqual(bang, [])  # 这个人说话本来就到 -12，-8 不再算惊跳
 
     def test_music_and_self_echo_do_not_startle(self):
         for kwargs in ({"music": True}, {"echo": .95}):
@@ -80,8 +105,12 @@ class ConservativeStartleTests(unittest.TestCase):
         reflex=AcousticReflex()
         for stamp in range(0,3000,20):reflex.update(-75,stamp,None,0)
         self.assertEqual(reflex.update(-22,3000,None,0),[])
-        reflex.update(-75,3020,None,0)
-        self.assertEqual(reflex.update(-8,3040,None,0)[0]['kind'],'startle')
+        self.assertEqual(reflex.update(-22,3020,None,0),[])
+        self.assertEqual(reflex.update(-22,3040,None,0),[])
+        reflex.update(-75,3060,None,0)
+        self.assertEqual(reflex.update(-8,3080,None,0),[])
+        self.assertEqual(reflex.update(-8,3100,None,0),[])
+        self.assertEqual(reflex.update(-8,3120,None,0)[0]['kind'],'startle')
 
 
 class DeviceGainTests(unittest.TestCase):
@@ -100,22 +129,30 @@ class DeviceGainTests(unittest.TestCase):
     def test_speech_on_a_quiet_array_is_not_a_startle_but_a_bang_is(self):
         # 2026-09-16 field measurement: floor -61, loudest speech frame -40.5.
         array = self.warmed(AcousticReflex(ReflexConfig(speech_peak_dbfs=-40.5)), -61)
-        self.assertEqual(array.update(-40.5, 3000, None, 0), [])
-        self.assertEqual(array.update(-25, 3020, None, 0)[0]['kind'], 'startle')
+        for stamp in range(3000, 3100, 20):
+            self.assertEqual(array.update(-40.5, stamp, None, 0), [])
+        held = []
+        for stamp in range(4000, 4100, 20):
+            held += array.update(-20, stamp, None, 0)
+        self.assertEqual(held[0]['kind'], 'startle')
 
     def test_the_same_level_is_only_speech_on_a_louder_device(self):
         # -25 dBFS is a bang on the array and an ordinary sentence on this one,
         # which is the whole reason the gate cannot be one number.
         builtin = self.warmed(AcousticReflex(), -61)
-        self.assertEqual(builtin.update(-25, 3000, None, 0), [])
-        self.assertEqual(builtin.update(-6, 3020, None, 0)[0]['kind'], 'startle')
+        for stamp in range(3000, 3200, 20):
+            self.assertEqual(builtin.update(-20, stamp, None, 0), [])  # 阵列上的巨响，这里只是说话
+        held = []
+        for stamp in range(4000, 4100, 20):
+            held += builtin.update(-6, stamp, None, 0)
+        self.assertEqual(held[0]['kind'], 'startle')
 
     def test_profile_carries_the_measured_level_into_both_gates(self):
         from voice_detection.profiles import get_profile
         config = config_for_profile(get_profile('sipeed_6_plus_1_usb_array'))
         self.assertAlmostEqual(config.speech_peak_dbfs, -40.5)
-        self.assertAlmostEqual(config.min_startle_dbfs, -30.5)
+        self.assertAlmostEqual(config.min_startle_dbfs, -26.5)
         self.assertAlmostEqual(config.immediate_startle_dbfs, -24.5)
         mac = config_for_profile(get_profile('mac_builtin'))
-        self.assertAlmostEqual(mac.min_startle_dbfs, -12.)
+        self.assertAlmostEqual(mac.min_startle_dbfs, -8.)
         self.assertAlmostEqual(mac.immediate_startle_dbfs, -6.)
