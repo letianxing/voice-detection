@@ -391,3 +391,17 @@ _owner_presence 承载 7 条用户明确要求过的保证（必须锁定、连�
 两条路，同一次到场会开口两次。已修：_owner_presence 开口时同步写 attention_trigger.last_fired_ms，
 两条路互斥。新增回归用例 test_the_owner_rule_and_the_invitation_cannot_both_open_the_same_arrival。
 验证：Attention 171、Brain 72、Vision 23、C++ 4 目标、DOM、离线端到端全过。
+
+## 注意力算法当前默认与切换方式（2026-09-16，最新）
+默认 av_memory_language_v1（未标定，v1/v2 现场优劣未比较，所以没把 v2 设默认）。三种切换方式：
+1. 8092「注意力输入源与算法」下拉选 v2 → 应用。写入 .run/attention-config.json，重启保留。
+2. 启动时环境变量 ATTENTION_ALGORITHM=av_memory_language_v2。
+3. POST /api/attention-config {"algorithm":"av_memory_language_v2"}。
+顺带修了两个会坑人的地方：
+- 运行中切换算法时，被切入的插件实例还带着上次运行留下的习惯化、返回抑制和交流意愿。
+  拿当前帧去和一个已经不存在的情形比较是错的。select() 现在会重建实例，切进去拿到的是算法本身，
+  不是它对上一段时间的记忆。新增用例 test_switching_gives_a_fresh_algorithm_not_its_earlier_state。
+- 之前持久化配置会静默覆盖 ATTENTION_ALGORITHM，设了环境变量像没生效。
+  现在显式环境变量优先于面板保存的选择（显式压过粘性），并且 /api/attention-config 里
+  algorithm.chosen_by 会说明这次是 default / environment / saved_console_choice 哪一种。
+验证：Attention 173、Brain 72、C++ 4 目标、DOM 通过；三种切换方式各实测一次。
