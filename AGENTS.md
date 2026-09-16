@@ -345,3 +345,23 @@ verify_attention_algorithm.py 增加同名场景。Attention 164、Brain 62、Vi
 验证：用现场记录的 13 个触发时刻回放，修复后只触发 1 次，其余全部被 nothing_new_since_our_last_turn 拦下。
 新增回归用例 test_the_robot_speaking_cannot_re_arm_it（显式覆盖 transition_id 变化不得重新武装）。
 Brain 64、Attention 164、C++ 4 目标通过。
+
+## 手势与表情接入注意力（2026-09-16，最新）
+用户提出两个场景：主人离开后回来要结合语境+表情手势判断并主动搭话；主人未离开但长时间沉默，
+要根据情绪主动询问。核查发现表情和手势此前完全没有进入注意力计算（competition_adapter /
+interaction_fusion / attention_common.hpp 零引用），只到千问那里组织措辞。已按「不同问题进不同层」接入：
+- 手势进交流意愿层的 phasic 通道。招手/叫人是视觉版的叫名字：有意图、离散、作为稳态无意义。
+  extra 键 gesture_invite/gesture_reject，主机在手势首次识别的那一帧发一次（同一手势不重复计分）。
+  招手 +2.2×分数×朝向，摆手拒绝 −2.4×分数（权重更高，认错「别烦我」代价更大）。
+  实测招手维持约 1.6 秒 ENGAGED，摆手压到 0。脉冲只施加一次但 reason 位保留 3 秒，否则日志解释不了信念跳变。
+- 表情不进交流意愿层。理由：交流意愿回答「他是不是在跟我说话」，表情在这个问题上是弱证据，
+  掺进去等于见谁笑就搭话。改为工作区内源性候选 affect_candidates.py，回答「谁看起来需要我开口」：
+  20 秒窗口 ≥12 个 valid 样本、≥60% 负面、已安静 ≥20 秒、识别置信度 ≥0.5、每人每 10 分钟最多一次；
+  负载给出样本数/占比/均值/安静时长，措辞是「表情持续偏低」不是断言心情。ATTENTION_AFFECT_EVENTS=0 可关。
+- 人离开 ≥3 秒后再出现触发去习惯化（change_id="return:<人>:<时刻>"）：回来本身是变化，应重新变得显著。
+- 补上了之前断掉的一段链路：工作区里 admitted 的非感知候选经 state / brain_input 的 workspace_events
+  交给 Brain，Brain 用与无声邀请相同的门槛（busy、8 秒间隔、自上次开口以来有新真人转写）决定是否开口。
+  被容量压制的候选不会交出去。prompt_context 按候选类型给不同提示词，明确要求不断言对方心情。
+限制：表情分类器噪声大，阈值（12 样本/60%/20 秒）是工程起点未在真人标定；
+主人「离开又回来」的主动问候仍是 Brain 的 _owner_presence 规则，尚未并入交流意愿层。
+验证：Attention 170、Brain 68、Vision 23、C++ 4 目标、DOM、离线端到端、runtime smoke 全过。
