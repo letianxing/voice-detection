@@ -475,3 +475,31 @@ finalize_gate 有一条 confirmed_voice_at_engaged_target：可靠声纹(≥.6) 
   在此之前，任何路径都不应单独依赖声纹 ≥0.6。
 新增用例：MeasuredThresholdTests（0.82 人脸分必须算在场；无法识别的人不得借用他人历史）。
 验证：Attention 182、Brain 72、Vision 23、C++ 4 目标、离线端到端全过。
+
+## 惊跳绝对门限改为跟随设备语音电平 + SenseVoice 终句识别（2026-09-16，最新）
+接上一轮（终端中断，未做完的部分在这里收尾）。
+
+惊跳：上一轮把绝对门限从 -12 dBFS 直接改成 -45，是按 Sipeed 实测调的，但它让三个既有用例挂了
+（tests/test_audio_scene 两个、test_bio_acoustics 一个：从安静起说一句普通话、-32 的中等瞬态，都被判成惊跳）。
+两次都错在同一件事：绝对 dBFS 门限其实是在描述某一台设备的输入增益。同一声喊叫在 Mac 内置麦约 -22 dBFS，
+在 Sipeed 阵列是 -40.5，所以 -12 等于「这块板子永远不惊跳」（现场 267 帧一次没到），
+而 -45 等于「正常增益的麦克风上每一句话都是惊跳」。
+改法：新增 MicrophoneProfile.speech_peak_dbfs（这台设备上普通说话能到的最响电平，实测值），
+惊跳兜底 = speech_peak + 10，scene_runtime 里「极强声保持快速反射、其余先定向等分类」的那条
+（原来写死 raw_dbfs < -6）= speech_peak + 16。默认 -22 → 仍是 -12/-6，旧行为不变；
+config/microphones.json 里 Sipeed 填 -40.5（现场最响一帧，噪声底 -61）→ -30.5/-24.5。
+可用 VOICE_SPEECH_PEAK_DBFS / VOICE_STARTLE_MIN_DBFS / VOICE_STARTLE_IMMEDIATE_DBFS 覆盖。
+新增 DeviceGainTests：阵列上 -40.5 的说话不惊跳、-25 惊跳；同一个 -25 在内置麦上只是说话不惊跳；
+两个 profile 的两档门限都按实测值推出来。
+注意：-40.5 是 2026-09-16 那一次会话、那个距离、那块板子的实测值，不是标定过的声压级，换增益或换距离要重测；
+scene_runtime 用的是 raw 通道 dBFS，反射内部用的是处理后的 mono，两者不是同一条信号，这个差异是旧有的，没改。
+
+SenseVoice：流式 Zipformer 继续出 partial（轮次与打断要它），句末再用离线 SenseVoice 重读一遍完整句，
+因为进记忆和进大模型的是最终那句。VOICE_ASR_SENSEVOICE_MODEL 存在时自动启用，缺模型退回原流式最终句。
+本机离线实测（weights 自带 test_wavs，未开麦克风）：warmup 0.48s，5–7 秒句子 84–115ms；
+三条中文样本上两个模型的字面内容基本一致，可见差别是标点与数字规范化（「早上九点」→「早上9点。」），
+不是 WER 优势——没有中文现场 WER 对比，不能说它更准。
+scripts/download_models.sh 原来把模型下到 models/，但代码全部在 weights/ 下找，新检出会下载到没人读的目录，已改为 weights/。
+新增 SenseVoiceFinalPassTest（缺模型在构造时就报错、不提供 create_stream 以免顶替 partial、真实模型转写一句）。
+dashboard 里 SenseVoice + 仅 Vosk（无 whisper 命令）时原本拿不到 partial，已补。
+验证：voice-detection 79 项、biomimetic-brain-test 72 项、python3 scripts/mac_stack.py check 全过；未开摄像头/麦克风/播放。

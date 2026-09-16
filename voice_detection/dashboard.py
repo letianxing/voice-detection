@@ -17,7 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .frontend import CocktailFrontend, now_ms
-from .asr import ExternalCommandAsrAdapter, NullAsrAdapter, SherpaZipformerAsrAdapter, VoskAsrAdapter, write_wav
+from .asr import (ExternalCommandAsrAdapter, NullAsrAdapter, SherpaSenseVoiceAsrAdapter,
+                  SherpaZipformerAsrAdapter, VoskAsrAdapter, write_wav)
 from .io import list_sounddevice_devices
 from .profiles import get_profile, load_profiles
 from .ros4hri import acoustic_track_to_ros4hri_json
@@ -208,7 +209,15 @@ class LiveMonitor:
         command = os.environ.get("VOICE_ASR_COMMAND", "").strip()
         vosk_model = os.environ.get("VOICE_ASR_VOSK_MODEL", "").strip()
         sherpa_model = os.environ.get("VOICE_ASR_SHERPA_MODEL", "").strip()
-        if sherpa_model:
+        sense_voice = os.environ.get("VOICE_ASR_SENSEVOICE_MODEL", "").strip()
+        # SenseVoice is offline, so it can only be the final pass. When it is
+        # configured the streaming model keeps its job — partials for turn-taking
+        # and barge-in — and only the finished sentence, which is what reaches
+        # memory and the model, gets the more accurate recogniser.
+        if sense_voice:
+            adapter = SherpaSenseVoiceAsrAdapter(sense_voice, os.environ.get("VOICE_ASR_LANGUAGE", "zh-CN"))
+            self.asr_backend = "sensevoice-small" + ("+sherpa-partial" if sherpa_model else "")
+        elif sherpa_model:
             adapter = SherpaZipformerAsrAdapter(sherpa_model, os.environ.get("VOICE_ASR_LANGUAGE", "zh-CN"))
             self.asr_backend = "sherpa-zipformer-zh"
         elif command:
@@ -228,9 +237,12 @@ class LiveMonitor:
         # small Vosk recognizer alongside it so the dashboard can still show
         # low-latency partial text without downgrading final accuracy.
         self._streaming_adapter = None
-        if sherpa_model:
+        if sense_voice and sherpa_model:
+            self._streaming_adapter = SherpaZipformerAsrAdapter(
+                sherpa_model, os.environ.get("VOICE_ASR_LANGUAGE", "zh-CN"))
+        elif sherpa_model:
             self._streaming_adapter = adapter
-        elif command and vosk_model:
+        elif vosk_model and (command or sense_voice):
             try:
                 self._streaming_adapter = VoskAsrAdapter(vosk_model, os.environ.get("VOICE_ASR_LANGUAGE", "zh-CN"))
             except Exception:
@@ -241,8 +253,9 @@ class LiveMonitor:
         self._asr_worker = AsrWorker(adapter, self._on_transcript, self._on_asr_error, self._preprocess_tse_audio)
         self._finalizer = UtteranceFinalizer(self._finalize_utterance, self._on_asr_error)
         self._streaming_asr = None
-        if isinstance(adapter, SherpaZipformerAsrAdapter):
-            adapter.warmup()
+        for warmable in (adapter, self._streaming_adapter):
+            if isinstance(warmable, (SherpaZipformerAsrAdapter, SherpaSenseVoiceAsrAdapter)):
+                warmable.warmup()
         blocksize = int(profile.sample_rate_hz * profile.preferred_block_ms / 1000.0)
         device_arg = None if device == "default" else coerce_device(device)
         try:
@@ -519,7 +532,8 @@ class LiveMonitor:
                 "playback": self.playback.state(),
                 "last_streaming_transcript": self.last_streaming_transcript,
                 "asr_enabled": bool(
-                    os.environ.get("VOICE_ASR_SHERPA_MODEL", "").strip()
+                    os.environ.get("VOICE_ASR_SENSEVOICE_MODEL", "").strip()
+                    or os.environ.get("VOICE_ASR_SHERPA_MODEL", "").strip()
                     or os.environ.get("VOICE_ASR_COMMAND", "").strip()
                     or os.environ.get("VOICE_ASR_VOSK_MODEL", "").strip()
                 ),

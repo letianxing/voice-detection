@@ -14,12 +14,13 @@
 ## 本项目已实现
 - 原始多通道采集、VAD、降噪、GCC-PHAT TDOA、波束形成与AEC；raw通道不足拒绝虚假方向，ILD仅诊断。Sipeed连接状态需要实际设备查询，不能凭选择profile认定连接。
 - Sherpa常驻子进程流式ASR，句末处理/声纹计算移出音频回调；Whisper/Vosk备选；有界队列与模型就绪状态。
+- 句末另用离线SenseVoice重读完整句（VOICE_ASR_SENSEVOICE_MODEL，缺模型退回流式最终句），流式模型继续出partial。实测收益是标点与数字规范化，没有中文现场WER对比。
 - CampPlus中文声纹。旧单模板兼容、多模板池最多8份、保留原始anchor，best/runner margin检查，原子写盘；同期高质量人脸与声纹一致才增加样本。不能凭一次弱匹配自学习。
 - 陌生人满足质量门槛自动建立stranger编号，正式注册别名归一，稳定身份记录去重。正式登记两段声纹一致性检查；每身份参考wav支持从新登记/可靠后续样本补齐。
 - SpeakerBeam/REAL-TSE单目标提取；multi_speaker.py完成语音段后逐参考分离、身份验证、ASR，--tse multi显式实验模式，最多4份登记参考/段长12s，同段多人的utterance_id不同。缺参考或验证失败不强行归人；mixed_fallback只记忆不放行。
 - PlaybackEngine常驻音频流，Brain传PCM16。实际播放参考、回声文本/时间匹配、旧ID隔离。半余弦淡出：普通20ms、礼让40ms、停止10ms、惊跳5ms，非微秒保证。
 - BioAcoustics：相对背景突增、上升沿、谱通量、2–4kHz比例、30–150Hz调制、F0Hz/voicing/斜率/停顿。不是诊断焦虑或危险。
-- AST声音事件/音乐、十类genre、BPM与节拍；Cough/Sneeze分类。一般突变先定向分类，极强声保持快速反射；语义alarm有窗口延迟。咳嗽分类去重，提供Brain关怀事件。
+- AST声音事件/音乐、十类genre、BPM与节拍；Cough/Sneeze分类。一般突变先定向分类，极强声保持快速反射；两档绝对门限由所选profile的speech_peak_dbfs推出（说话峰值+10/+16），不是写死的dBFS，Sipeed实测-40.5；语义alarm有窗口延迟。咳嗽分类去重，提供Brain关怀事件。
 - VAP官方权重，4秒AEC残差+实际TTS参考输入，MPS优先、独立有界worker；仅辅助轮次确认，未校准中文多人远场。
 - ROS话题发布、实时8090接口、模型耗时/健康信息。声纹池/API与分离数据可供Attention使用。
 

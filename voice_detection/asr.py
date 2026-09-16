@@ -109,6 +109,54 @@ class SherpaZipformerAsrAdapter(AsrAdapter):
         return result
 
 
+class SherpaSenseVoiceAsrAdapter(AsrAdapter):
+    """Offline SenseVoice for the finished sentence only.
+
+    SenseVoice cannot stream, so it never replaces the streaming recogniser: the
+    streaming model keeps producing partials for turn-taking and barge-in, and
+    this runs once per completed utterance. The final text is what reaches
+    memory and the language model, so accuracy matters more there than latency.
+    """
+
+    def __init__(self, model_dir: str | Path, language: str = "zh-CN", threads: int = 2):
+        root = Path(model_dir).expanduser()
+        model = root / "model.int8.onnx"
+        if not model.is_file():
+            model = root / "model.onnx"
+        if not model.is_file():
+            raise RuntimeError(f"SenseVoice model files not found: {root}")
+        self.model = str(model)
+        self.tokens = str(root / "tokens.txt")
+        self.language = language
+        self.threads = threads
+        self.recognizer = None
+
+    def warmup(self):
+        if self.recognizer is None:
+            import sherpa_onnx
+            self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=self.model, tokens=self.tokens, num_threads=self.threads,
+                use_itn=True, language="zh" if self.language.lower().startswith("zh") else "auto",
+                debug=False)
+
+    def close(self):
+        self.recognizer = None
+
+    def transcribe(self, track_id: str, audio: np.ndarray, sample_rate_hz: int) -> SpeechTranscript | None:
+        self.warmup()
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if samples.size < sample_rate_hz // 20:
+            return None
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(sample_rate_hz, samples)
+        self.recognizer.decode_stream(stream)
+        text = str(stream.result.text or "").strip()
+        if not text:
+            return None
+        return SpeechTranscript(track_id=track_id, text=text, is_final=True,
+                                language=self.language, clarity=1.0, confidence=1.0)
+
+
 class SherpaProcessStreamingSession:
     """Sherpa session in a child process to isolate native ONNX runtimes."""
 
