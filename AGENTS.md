@@ -405,3 +405,25 @@ _owner_presence 承载 7 条用户明确要求过的保证（必须锁定、连�
   现在显式环境变量优先于面板保存的选择（显式压过粘性），并且 /api/attention-config 里
   algorithm.chosen_by 会说明这次是 default / environment / saved_console_choice 哪一种。
 验证：Attention 173、Brain 72、C++ 4 目标、DOM 通过；三种切换方式各实测一次。
+
+## 现场两个场景的定位与修复（2026-09-16，最新，均为我的 bug）
+场景A：镜头外叫名字触发了，但过一会儿再说话就不回了。
+  复现：交流意愿只有 0.678（阈值 0.72），而且融合层根本没有 ENGAGED 分支——只有 EXPECTED_ANSWER 和 INVITED。
+  根因两条：
+  1) 记忆通道没有区分「说过话」和「在对机器人说话」。recent_participants 两者都算作参与者，
+     所以刚跟机器人对话完的人和旁边闲聊的人权重一样。
+  2) interaction_fusion 没有 ENGAGED 分支，即使意愿够了也不放行。
+  修复：Brain 新增 _recent_addressees()，attention_memory.recent_participants 每项带 last_addressed_ms；
+  attention_sources 衰减成 memory_open_exchange=exp(-age/15000)（60 秒外丢弃），
+  经 extra 键 memory_open_exchange 进插件，权重 0.40，并纳入语言 phasic 的合取项。
+  融合层新增 ENGAGED 分支：可靠声纹（≥.6）的同一人再次开口即放行，不要求可见。
+  实测：3 秒前对机器人说过话 → 1350ms 放行；10 秒 → 1950ms；30 秒以上不放行；
+  从没对机器人说过话的旁人永不放行。约 15 秒跟随窗口，与车载语音的 follow-up 行为一致。
+场景B：旁人在说话时有人转头看机器人，不回应。
+  复现：交流意愿层两种情况都正确给出 INVITED 0.773，是我在融合层加的 `not clean`
+  （「没有任何干净语音」）把它扔掉了。应该是「这个人自己没在说话」，而不是「没人在说话」——
+  交流意愿层本来就已经要求该人 voice_activity<0.3 才报 INVITED。
+  修复：改为只检查归属该人的干净声轨。原测试断言的正是错误行为，已改写为断言真正该保证的那条。
+顺带修掉一个潜在 bug：手势 reason 位用 `stamp - invited_ms < 3000` 判断，默认值 0 在小时间戳下落在窗口内，
+纯音频候选也会报 gesture_invite/gesture_reject。已加 >0 守卫。
+验证：Attention 176、Brain 72、Vision 23、C++ 4 目标、DOM、离线端到端全过。
