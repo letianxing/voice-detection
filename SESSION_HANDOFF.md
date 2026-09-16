@@ -24,7 +24,30 @@ SSH user@172.16.60.162；密码不写入交接文档。systemd用户服务robo-q
 - 千问自主解释语境，不要新增“你说呢->最后一句”的场景硬编码。默认温柔短答，复杂比较总结允许完整1–2句。
 - 插拔视听、记忆上下文、内部状态；当前没有内部状态也能正常工作，缺失明确标注，不造内部情绪数值。
 
-## 最新实现（2026-09-16 第三轮：跨会话熟悉度 + 识别置信度耦合）
+## 最新实现（2026-09-16 第四轮：统一订阅点 + v2 算法 + 换识别模型）
+1) 统一订阅点 global_workspace.py：每个感知周期广播一份内容，供 Brain 和以后的系统消费。
+   GET /api/workspace（最新+丢帧统计）、?since=N（回放，有界 64 条）、/api/workspace/stream（SSE）、
+   ROS /attention/workspace。订阅者落后丢帧并计数，不阻塞感知循环。Brain 现有 brain_input 通路未动。
+   内容含 cycle/focus/target/engagement/coalition/sources/algorithm/provenance；是本轮竞争结果，不是意识。
+2) 新算法 av_memory_language_v2：按用户给的理论表查漏补缺。
+   - Reynolds-Heeger 归一化模型：自上而下改为乘性注意场调制刺激后再归一化（v1 是相加，
+     会让刺激很弱的候选被目标项抬起来）。
+   - Selective Tuning：选中目标的方位邻域被抑制，解决两人并排时焦点来回拉扯。无方位则不抑制，不猜。
+   - 交流意愿层抽到 src/plugins/attention_common.hpp，v1/v2 共享，避免两个算法对「是否在跟我交流」产生分歧。
+   - v1/v2 跑同一套行为用例全过；优劣未经现场对比，默认仍是 v1。
+   - 方位经 ABI v1 预留的键值扩展位 azimuth_deg 传入，没改结构体布局。
+3) 识别模型已替换（旧档案按用户指示清空，备份 ~/Golands/.identity-backup-*）：
+   - 声纹 CampPlus -> ERes2NetV2（192 维，sherpa-onnx 直接加载）。本机 3 秒语音 14.1ms -> 53.9ms，句末算。
+   - 离线分数分布实测（6 个 macOS 中文音色 × 4 句）：两模型冒充者上限都 0.70、同音色下限都 0.85，
+     尺度接近，原阈值 0.48/0.6 可沿用。合成语音一致性高于真人，不能当现场 EER。
+     脚本 voice-detection/scripts/measure_speaker_thresholds.py
+   - 人脸新增可切换后端 vision-detection/scripts/face_embedder.py：sface（默认，Apache-2.0，5.7ms）
+     与 arcface（buffalo_l w600k_r50，512 维，25.5ms 含对齐，明显更准）。
+     默认没改成 arcface：其权重与训练数据仅限非商业研究用途，本系统用途尚未确定。
+     确定研究/内部使用后 --face-backend arcface 或 VISION_FACE_BACKEND=arcface 即可。
+   - 身份识别加 300ms 节流（VISION_IDENTITY_INTERVAL_MS），按人脸位置缓存。
+
+## 上一轮实现（2026-09-16 第三轮：跨会话熟悉度 + 识别置信度耦合）
 - 新增第五个来源 cross_session_memory：familiarity.py 后台单线程查 hri-memory-service
   （all_sessions + entity_id + kinds），统计该人在以往会话里真实交谈过的不同会话数，4 个饱和为 1.0。
   快循环只读缓存；「服务查不到」与「没有记录」是两种状态，前者不出现在结果里，不会被当成陌生人。
@@ -64,7 +87,7 @@ CompetitionAdapter 无内态时不制造 motivation；arousal 数学默认1只�
 当前 MacTTS 还未换成神经情绪音色；Qwen3-TTS Serena 已核实选型但未部署。pacific-rim tts_service 缺核心 tts_engine.py 且取消/结束契约不完整，不能宣称兼容替换完成。
 
 ## 关键验证
-本轮：Attention 143 项、Brain 62 项、C++ attention_plugin_test 9 项、8092 DOM 全部通过。
+本轮：Attention 151 项、Brain 62 项、Vision 16 项、C++ 4 个测试目标（核心 + v1/v2 同一套行为用例 + 抑制环）、8092 DOM 全部通过。
 scripts/verify_attention_algorithm.py 用真实来源适配器 + 真实 .so + 真实融合跑九个离线场景（含关闭记忆来源的消融、跨会话熟悉度、识别不可靠三组对照），未开摄像头/麦克风/网络。
 python3 scripts/mac_stack.py check 通过，已含注意力算法 .so 预检（缺失只降级不阻断）。
 Voice最近73、Vision8、HRI6为较早各自相关变更的结果，不要说本轮全部重新跑过。
@@ -77,7 +100,9 @@ Voice最近73、Vision8、HRI6为较早各自相关变更的结果，不要说�
 1b. 称呼他人只能识别已登记的人名（person_id 即注册时说的名字），陌生人没有名字时该特征恒为0，不是"检查过了"。
 1c. 语境特征是通用句式与词面重叠，不是语义理解，也不调用大模型；话题延续只与机器人参与过的对话比对。
 1d. 跨会话熟悉度用的是「不同历史会话数」，4 个饱和为 1.0，是工程饱和点不是人类熟悉度阈值；未做现场标定。
-1e. 声纹/人脸模型未更换：仍为 CampPlus(zh) + YuNet/SFace。已完成选型调研（见下方"识别模型选型"），换模型会作废现有声纹与人脸模板，需重新登记，等用户决定。
+1e. 声纹已换 ERes2NetV2；人脸默认仍 sface，arcface 已下载待用途确认。两者阈值都未在真人数据上标定，
+    换模型后必须真人重新登记（旧档案已清空，备份在 ~/Golands/.identity-backup-*）。
+1f. v2 算法与 v1 的现场优劣未比较；global_workspace 尚无真实消费者接入，只验证了广播与订阅本身。
 2. 任意人数逐字实时重叠分离；现multi仅完成语音段、最多4登记参考/12秒、独立身份验证。
 3. 完整人际听话人/代词指向模型、完整麦格克音素融合。
 4. 情绪神经TTS实际部署、流式首音频/取消/AEC兼容。现Tingting的温柔文本不等于情绪音色。

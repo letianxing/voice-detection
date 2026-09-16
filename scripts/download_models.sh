@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="${ROOT_DIR}/models"
 mkdir -p "${MODEL_DIR}"
 
-SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
-SPEAKER_PATH="${MODEL_DIR}/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
+SPEAKER_PATH="${MODEL_DIR}/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
 
 if [[ ! -s "${SPEAKER_PATH}" ]]; then
   curl -L --fail --retry 5 --retry-delay 2 --retry-all-errors \

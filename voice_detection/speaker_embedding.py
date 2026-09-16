@@ -133,7 +133,7 @@ class SpeakerProfileStore:
             "embeddings": pool,
             "pool_version": 1,
             "reference_path":previous.get("reference_path"),
-            "model": "3dspeaker-campplus-zh-cn",
+            "model": "3dspeaker-eres2netv2-zh-cn",
             "enrollment_text": enrollment_text,
         }
         self.save()

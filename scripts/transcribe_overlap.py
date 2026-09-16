@@ -13,7 +13,7 @@ def main():
  root=Path(__file__).resolve().parents[1]
  audio,rate=sf.read(a.wav,dtype='float32',always_2d=True)
  store=SpeakerProfileStore(root/'config/speaker_profiles.json')
- embedder=SpeakerEmbedder(root/'weights/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx')
+ embedder=SpeakerEmbedder(root/'weights/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx')
  adapter=SherpaZipformerAsrAdapter(root/'weights/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30')
  try:
   processor=MultiSpeakerTranscriber(store,embedder,adapter,root/'weights/real-tse/pretrained/spk_emb_causal_100')

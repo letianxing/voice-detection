@@ -191,7 +191,7 @@ class LiveMonitor:
         frontend = CocktailFrontend(profile, vad_calibration_frames=15)
         model_path = os.environ.get(
             "VOICE_SPEAKER_MODEL",
-            str(Path(__file__).resolve().parents[1] / "weights" / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"),
+            str(Path(__file__).resolve().parents[1] / "weights" / "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"),
         )
         self.speaker_embedder = SpeakerEmbedder(model_path)
         self.speaker_profiles = SpeakerProfileStore(

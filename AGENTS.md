@@ -277,3 +277,22 @@ Attention现在有视听/记忆/可选内部状态支持源；本项目既有感
 - 验证：Attention 143、Brain 62、C++ attention_plugin_test 9、DOM 通过；
   verify_attention_algorithm.py 九个离线场景（含三组消融/对照）全过，未开硬件。
 - 本轮仍未启动采集，未改远端 162 Qwen。
+
+## 统一订阅点、v2 注意力算法与识别模型替换（2026-09-16，最新）
+- Global Workspace：robot_attention_perception/global_workspace.py 是感知循环的广播步骤，只发布竞争结果，
+  不做决策。内容含 cycle/focus/target/engagement/coalition/sources/algorithm/provenance。
+  入口 GET /api/workspace、?since=N 回放、/api/workspace/stream（SSE）、ROS /attention/workspace。
+  订阅者落后丢帧并计数，不阻塞感知循环；Brain 现有 /attention/brain_input 通路未改动。
+  这是 LIDA 认知周期里的广播一步，不声称实现了意识或完整认知周期。
+- 按用户给的理论表查漏补缺，新增 av_memory_language_v2：
+  Reynolds-Heeger 乘性注意场（v1 的相加式会让弱刺激候选被目标项抬起来）+ Selective Tuning 方位抑制环
+  （两人并排时不再来回拉扯焦点；无方位则不抑制）。交流意愿层抽到 attention_common.hpp 由 v1/v2 共享。
+  v1/v2 跑同一套行为用例全过，但现场优劣未比较，默认仍是 v1。方位走 ABI 预留的 azimuth_deg 扩展位，未改布局。
+- 识别模型：声纹 CampPlus -> ERes2NetV2（192 维，14.1ms -> 53.9ms/3 秒，句末计算）。
+  离线分数分布实测两模型尺度接近（冒充者上限都 0.70、同音色下限都 0.85），原阈值 0.48/0.6 可沿用——
+  之前"阈值不可跨模型平移"的担心经测量并不成立。合成语音不等于真人，现场 ROC 仍未做。
+  人脸新增可切换后端：sface（默认，Apache-2.0）/ arcface（buffalo_l w600k_r50，更准）。
+  默认没改 arcface，因为其权重仅限非商业研究用途而本系统用途未定；用户确认后一个开关即可切换。
+  身份识别加 300ms 节流，按人脸位置缓存，身份本就不逐帧变化。
+- 旧声纹与人脸档案已按用户指示清空，备份在 ~/Golands/.identity-backup-*；必须真人重新登记。
+- 验证：Attention 151、Brain 62、Vision 16、C++ 4 个测试目标、DOM、九场景离线端到端全过；未开硬件。
