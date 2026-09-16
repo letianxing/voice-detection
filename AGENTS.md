@@ -365,3 +365,29 @@ interaction_fusion / attention_common.hpp 零引用），只到千问那里组�
 限制：表情分类器噪声大，阈值（12 样本/60%/20 秒）是工程起点未在真人标定；
 主人「离开又回来」的主动问候仍是 Brain 的 _owner_presence 规则，尚未并入交流意愿层。
 验证：Attention 170、Brain 68、Vision 23、C++ 4 目标、DOM、离线端到端、runtime smoke 全过。
+
+## 沉默+情绪主动询问，以及主人问候合并的中止（2026-09-16，最新）
+可测试的部分（已端到端验证，未开硬件）：
+- affect_candidates.py 有一个必须修的缺陷已修：MIN_SAMPLES=12 在视觉 20fps 下只有 0.6 秒，
+  那是「皱了下眉」不是「持续偏低」。加了 MIN_SPAN_MS=8000，实测真实速率下首次触发从 0.6s 变成 8.0s。
+- 链路已通：affect/memory 候选 -> 工作区 admitted -> state 与 brain_input 的 workspace_events ->
+  Brain AttentionTrigger（busy / 8 秒间隔 / 自上次开口以来有新真人转写）-> prompt_context 按类型给提示词。
+  affect 的提示词明确要求不断言对方心情、不提「我看你表情」。Brain 端有 runtime 级用例覆盖。
+发现并修复的真 bug：交流意愿积分器用精确解，dt 很大时会一步跳到稳态，
+等于给「没观察到的那段时间」也算了证据（测试里跳过 19 秒后 50ms 就 INVITED）。
+已加 kMaxRisingDt=1.0：遗忘按真实 dt，累积不得超过实际观察到的时间。卡顿或人离开后回来都不会再瞬间越阈值。
+修正后实测：主人回来（本次聊过+跨会话熟悉）1.3 秒 INVITED，（只有跨会话熟悉）2.5 秒，陌生人永不。
+
+主人「离开又回来」的主动问候合并进注意力：**尝试过，中止，已回滚开口部分**。
+可行性已验证：INVITED 确实覆盖了这个场景（1.3–2.5 秒）。中止原因：
+_owner_presence 承载 7 条用户明确要求过的保证（必须锁定、连续安静5秒、视觉短暂丢失保留等待不开口、
+身份置信度波动不重复、锁定丢失取消、注意力切换重置等待），合并后这些保证的归属方变成注意力层，
+需要删改 7 个 Brain 测试并搬走 state["initiative"] 面板状态——是结构调整不是补丁。
+在现场测试之前做，等于让现场验证一份几分钟前写的代码，且安全网被拆掉一半。
+保留下来的部分：AttentionTrigger 新增 arrival_needs_a_quiet_room（没在本次会话说过话的人，
+开口前要求房间安静 5 秒）——这条保证本来只有 _owner_presence 有，现在对任何人都成立；
+以及 spoke_this_session 与对应的「刚出现/刚回来」提示词分支。
+必须现在修的真缺陷（本轮引入）：加了跨会话熟悉度之后，回来的主人会同时走 _owner_presence 和 INVITED
+两条路，同一次到场会开口两次。已修：_owner_presence 开口时同步写 attention_trigger.last_fired_ms，
+两条路互斥。新增回归用例 test_the_owner_rule_and_the_invitation_cannot_both_open_the_same_arrival。
+验证：Attention 171、Brain 72、Vision 23、C++ 4 目标、DOM、离线端到端全过。
