@@ -330,3 +330,18 @@ Attention现在有视听/记忆/可选内部状态支持源；本项目既有感
 离散路径仍承担「绑定」（source_track_id / 人脸 / adopt 视觉目标），finalize_gate 依赖它，那不是重复裁决。
 新增回归用例：cpp_attention_plugin_test 里 walking_up_and_speaking / speech_while_turned_away（v1、v2 各跑一遍），
 verify_attention_algorithm.py 增加同名场景。Attention 164、Brain 62、Vision 23、C++ 4 目标、DOM 全过。
+
+## TTS 重复回话的定位与修复（2026-09-16，最新，回归由我引入）
+现场现象：同一句回复每 5–7 秒重复，末段退化到每 0.5 秒一次。
+定位：hri-memory events.jsonl 的 brain_trace 显示 attention_trigger_started 紧跟每个 turn_finished，
+自我循环（246298 触发 → 250105 说完 → 250209 再触发 → 255220 说完 → 255238 再触发）。
+根因：把 GazeInvitation 换成 AttentionTrigger 时，去重键从（人, 对话片段 episode_id）
+改成了（状态, 人, transition_id）。transition_id 在机器人自己说话时必然变化——
+注意力进 RESPONDING 再回 INVITED 就是新 id、新键、重新触发。粘性键被换成了易变键。
+修复：不再用任何来自注意力状态的键。重新武装要求「自上次开口以来有新的真人最终转写」，
+外加 8 秒最小间隔兜底。关键细节：不能用 last_human_ms（来自原始 VAD），
+机器人自己播放时 VAD 也会 active，回声会把它重新武装——改用 heard 列表里最新的非回声转写时刻
+（_last_heard_human_ms），回声在进 heard 之前就被拦掉了。
+验证：用现场记录的 13 个触发时刻回放，修复后只触发 1 次，其余全部被 nothing_new_since_our_last_turn 拦下。
+新增回归用例 test_the_robot_speaking_cannot_re_arm_it（显式覆盖 transition_id 变化不得重新武装）。
+Brain 64、Attention 164、C++ 4 目标通过。
