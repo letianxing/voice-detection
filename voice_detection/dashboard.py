@@ -18,7 +18,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .frontend import CocktailFrontend, now_ms
 from .asr import (ExternalCommandAsrAdapter, NullAsrAdapter, SherpaSenseVoiceAsrAdapter,
-                  SherpaZipformerAsrAdapter, VoskAsrAdapter, offline_pass_is_corroborated, write_wav)
+                  SherpaZipformerAsrAdapter, VoskAsrAdapter, offline_pass_is_corroborated,
+                  resample_mono, write_wav)
 from .io import list_sounddevice_devices
 from .profiles import get_profile, load_profiles
 from .ros4hri import acoustic_track_to_ros4hri_json
@@ -27,6 +28,7 @@ from .streaming_asr import AsrWorker, UtteranceSegmenter
 from .utterance_finalizer import UtteranceFinalizer
 from .target_speaker import create_target_speaker_extractor
 from .speaker_embedding import SpeakerEmbedder, SpeakerProfileStore
+from .speaker_tracks import MixedAudioRing, SpeakerTracker
 
 
 INDEX_HTML = """<!doctype html>
@@ -149,6 +151,13 @@ class LiveMonitor:
         self._capture_generation = 0
         self.last_transcript: dict[str, object] | None = None
         self.last_streaming_transcript: dict[str, object] | None = None
+        # Declared here so the state endpoint works before capture has started.
+        self.audio_ring = None
+        self.speaker_tracker = None
+        self.speaker_error = ""
+        self._speaker_context = None
+        self._speaker_worker = None
+        self._speaker_stop = threading.Event()
         self._streaming_asr = None
         self._streaming_adapter = None
         self._streaming_started_ms = 0
@@ -250,12 +259,20 @@ class LiveMonitor:
         elif hasattr(adapter, "create_stream"):
             self._streaming_adapter = adapter
         self._asr_adapter = adapter
+        # The ear keeps the last half minute of what it heard: focused hearing
+        # has to be able to start mid-sentence, and speaker tracking reads short
+        # windows out of it rather than holding its own copy.
+        self.audio_ring = MixedAudioRing(16000, float(os.environ.get("VOICE_RING_SECONDS", "30")))
+        self.speaker_tracker = SpeakerTracker(self.speaker_embedder, self.speaker_profiles) \
+            if self.speaker_embedder is not None else None
+        self._speaker_worker = None
         self._asr_worker = AsrWorker(adapter, self._on_transcript, self._on_asr_error, self._preprocess_tse_audio)
         self._finalizer = UtteranceFinalizer(self._finalize_utterance, self._on_asr_error)
         self._streaming_asr = None
         for warmable in (adapter, self._streaming_adapter):
             if isinstance(warmable, (SherpaZipformerAsrAdapter, SherpaSenseVoiceAsrAdapter)):
                 warmable.warmup()
+        self._speaker_context = None
         blocksize = int(profile.sample_rate_hz * profile.preferred_block_ms / 1000.0)
         device_arg = None if device == "default" else coerce_device(device)
         try:
@@ -302,6 +319,12 @@ class LiveMonitor:
             if self.scene is not None:
                 self.scene.submit(frame, output.target_audio, output.tracks[0].raw_echo_probability if output.tracks else echo, track_id=output.target_track_id, vad_active=output.vad_active, playback_reference=self.playback.reference.read_for(frame))
             human_voice = bool(output.vad_active and echo < 0.75)
+            # Cheap: a memcpy on the callback thread. The embedding happens on the
+            # worker below, never here.
+            if self.audio_ring is not None:
+                self.audio_ring.append(resample_mono(output.target_audio, frame.sample_rate_hz, 16000), frame.stamp_ms)
+            if output.vad_active:
+                self._speaker_context = (frame.stamp_ms, output.tracks[0].azimuth_deg if output.tracks else None, echo)
             if output.vad_active:
                 self._utterance_echo.append(echo)
                 self._utterance_echo = self._utterance_echo[-1500:]
@@ -393,6 +416,10 @@ class LiveMonitor:
                 callback=callback,
             )
             self._stream.start()
+            if self.speaker_tracker is not None:
+                self._speaker_stop.clear()
+                self._speaker_worker = threading.Thread(target=self._track_speakers, daemon=True)
+                self._speaker_worker.start()
             with self.lock:
                 self.running = True
                 self.error = ""
@@ -407,6 +434,23 @@ class LiveMonitor:
                 self.running = False
                 self.error = str(exc)
             self.stop()
+
+    def _track_speakers(self):
+        """One embedding every 300 ms of speech, off the audio callback."""
+        while not self._speaker_stop.wait(.05):
+            tracker, context = self.speaker_tracker, self._speaker_context
+            if tracker is None or context is None:
+                continue
+            stamp_ms, azimuth, echo = context
+            if not tracker.due(stamp_ms):
+                continue
+            window, end_ms = self.audio_ring.window(tracker.window_ms)
+            if window.size:
+                try:
+                    tracker.observe(window, end_ms or stamp_ms, azimuth, echo)
+                except Exception as exc:
+                    with self.lock:
+                        self.speaker_error = str(exc)
 
     def _finalize_utterance(self, utterance, stream, track, context):
         context = dict(context)
@@ -488,6 +532,10 @@ class LiveMonitor:
 
     def stop(self) -> None:
         self._capture_generation += 1
+        self._speaker_stop.set()
+        worker, self._speaker_worker = self._speaker_worker, None
+        if worker is not None:
+            worker.join(timeout=1.0)
         if self._stop_timer is not None:
             self._stop_timer.cancel()
             self._stop_timer = None
@@ -530,6 +578,8 @@ class LiveMonitor:
                 "ros": self.ros.status() if self.ros else {"enabled": False},
                 "error": self.error,
                 "last_track": self.last_track,
+                "speakers": self.speaker_tracker.state(now_ms()) if self.speaker_tracker else
+                            {"speakers": [], "active": [], "reason": "no_speaker_model"},
                 "last_vad": self.last_vad,
                 "last_speaker": self.last_speaker,
                 "last_event": self.last_event,
