@@ -556,7 +556,7 @@ class LiveMonitor:
             if (not echo_match and data.get("speaker_vector") and self.speaker_profiles
                     and float(data.get("self_echo_probability") or 0)<.4 and float(data.get("overlap_probability") or 0)<.25
                     and transcript.ended_ms-transcript.started_ms>=1500 and str(data.get("text") or "").strip()):
-                identity, role, similarity=self.speaker_profiles.remember_stranger(data["speaker_vector"])
+                identity, role, similarity=self.speaker_profiles.remember_stranger(data["speaker_vector"], duration_ms=transcript.ended_ms-transcript.started_ms, now_ms=transcript.ended_ms)
                 speaker.update(speaker_id=identity,speaker_role=role,similarity=similarity)
                 self.last_speaker=dict(speaker,embedding=data["speaker_vector"],finalized_identity=True)
             from .echo_guard import normalized
