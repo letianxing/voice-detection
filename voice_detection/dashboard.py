@@ -776,7 +776,8 @@ class LiveMonitor:
             speaker = context.pop("speaker", {})
             data["speaker_vector"] = speaker.pop("embedding", [])
             data.update(context)
-            echo_match = self.playback.echo_match(data.get("text", ""), int(data.get("started_ms") or 0), int(data.get("ended_ms") or now_ms()), float(speaker.get("similarity") or 0))
+            echo_match = self.playback.echo_match(data.get("text", ""), int(data.get("started_ms") or 0), int(data.get("ended_ms") or now_ms()), float(speaker.get("similarity") or 0),
+                                                  float(data.get("self_echo_probability") or 0))
             data["source"] = "robot_echo" if echo_match else "microphone"
             data["echo_match"] = echo_match
             if echo_match:

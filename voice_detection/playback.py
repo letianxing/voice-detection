@@ -156,11 +156,11 @@ class PlaybackEngine:
                 stream.abort()
                 stream.close()
 
-    def echo_match(self, text, started_ms, ended_ms, speaker_similarity=0.):
+    def echo_match(self, text, started_ms, ended_ms, speaker_similarity=0., self_echo_probability=0.):
         from .echo_guard import match_playback
         with self.lock:
             records = [dict(item) for item in self.recent]
-        return match_playback(text, started_ms, ended_ms, records, speaker_similarity)
+        return match_playback(text, started_ms, ended_ms, records, speaker_similarity, self_echo_probability)
 
     def aligned_reference(self, frame):
         """Estimate acoustic delay over 0–240ms using decimated correlation."""
