@@ -273,8 +273,12 @@ class LiveMonitor:
                 "default_samplerate": float(info["default_samplerate"]),
             }
         except Exception as exc:
+            # "No input device matching 'MicArray'" on its own reads like a
+            # configuration mistake, and the first thing anyone then checks is
+            # the name they typed. Most of the time the array simply is not
+            # enumerating, so say what the machine can actually see.
             with self.lock:
-                self.error = f"input device preflight failed: {exc}"
+                self.error = f"input device preflight failed: {exc}；本机当前可用输入设备：{available_inputs()}"
             return
 
         try:
@@ -755,6 +759,16 @@ def coerce_device(value: str):
         return int(value)
     except ValueError:
         return value
+
+
+def available_inputs() -> str:
+    """Input devices this machine can actually see, for the preflight message."""
+    try:
+        devices = [f"[{item['index']}] {item['name']}({item['max_input_channels']}ch)"
+                   for item in list_sounddevice_devices() if 'name' in item]
+    except Exception as exc:
+        return f"无法枚举（{exc}）"
+    return "、".join(devices) if devices else "一个都没有"
 
 
 def main() -> None:
