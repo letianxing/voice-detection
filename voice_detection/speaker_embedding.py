@@ -78,7 +78,27 @@ STRANGER_PROMOTE_MIN_SAMPLES = 3
 STRANGER_PROMOTE_MIN_DURATION_MS = 15000
 STRANGER_PROVISIONAL_TTL_MS = 72 * 3600 * 1000
 STRANGER_DEGENERATE_MEDIAN = 0.93        # pool pairwise-median above this is a collapsed embedding, not a voice. Pending calibration.
-LIFECYCLE_KEYS = ("lifecycle", "created_ms", "samples", "total_duration_ms", "evidence_similarity")
+LIFECYCLE_KEYS = ("lifecycle", "created_ms", "samples", "total_duration_ms", "evidence_similarity", "evidence_bodies")
+
+
+def _body_conflict(bodies):
+    """Two utterances credited to different visible people while both were in view.
+
+    Each entry is {"internal_id": who the utterance was bound to, "visible_ids": everyone
+    in the camera at that moment}. One voice cannot come from two bodies that the
+    camera saw at the same time, so the profile is not one person. Sequential ids are
+    not a conflict: an unregistered face gets a new track id whenever it leaves and
+    returns, so A-then-B is usually the same person renumbered.
+    """
+    known = [b for b in bodies if b.get("internal_id")]
+    for i in range(len(known)):
+        for j in range(i + 1, len(known)):
+            a, b = known[i], known[j]
+            if a["internal_id"] == b["internal_id"]:
+                continue
+            if a["internal_id"] in (b.get("visible_ids") or []) or b["internal_id"] in (a.get("visible_ids") or []):
+                return a["internal_id"], b["internal_id"]
+    return None
 
 
 class SpeakerProfileStore:
@@ -113,7 +133,7 @@ class SpeakerProfileStore:
             finally:
                 if os.path.exists(name):os.unlink(name)
 
-    def remember_stranger(self, embedding, duration_ms=None, now_ms=None):
+    def remember_stranger(self, embedding, duration_ms=None, now_ms=None, internal_id="", visible_ids=None):
         """Attribute an unregistered utterance without publishing a guess.
 
         Returns (speaker_id, role, similarity). The id is "unknown" unless the
@@ -125,7 +145,8 @@ class SpeakerProfileStore:
             speaker_id, role, similarity = self._match_any(embedding)
             if speaker_id != "unknown":
                 if self.profiles.get(speaker_id, {}).get("role") == "stranger":
-                    return self._grow_stranger(speaker_id, embedding, duration_ms, now_ms, similarity)
+                    return self._grow_stranger(speaker_id, embedding, duration_ms, now_ms, similarity,
+                                               internal_id, visible_ids)
                 return speaker_id, role, similarity
             ranked = self.rank(embedding)
             best = ranked[0]["score"] if ranked else 0.0
@@ -139,14 +160,28 @@ class SpeakerProfileStore:
             speaker_id = "stranger_" + uuid.uuid4().hex[:12]
             self._enroll(speaker_id, embedding, "stranger", "")
             self.profiles[speaker_id].update(lifecycle="provisional", created_ms=now_ms, samples=1,
-                                             total_duration_ms=int(duration_ms or 0))
+                                             total_duration_ms=int(duration_ms or 0),
+                                             evidence_bodies=[self._body_entry(internal_id, visible_ids)])
             self.save()
             return "unknown", "unknown", best
 
-    def _grow_stranger(self, speaker_id, embedding, duration_ms, now_ms, similarity):
+    @staticmethod
+    def _body_entry(internal_id, visible_ids):
+        return {"internal_id": str(internal_id or ""),
+                "visible_ids": [str(v) for v in (visible_ids or []) if str(v)]}
+
+    def _grow_stranger(self, speaker_id, embedding, duration_ms, now_ms, similarity, internal_id="", visible_ids=None):
         profile = self.profiles[speaker_id]
         state = self.lifecycle(speaker_id)
         if state == "established":
+            # Still watched: a published profile hit from a second visible body is withdrawn.
+            bodies = (list(profile.get("evidence_bodies") or []) + [self._body_entry(internal_id, visible_ids)])[-8:]
+            profile["evidence_bodies"] = bodies
+            if _body_conflict(bodies):
+                profile["lifecycle"] = "contested"
+                self.save()
+                return "unknown", "unknown", similarity
+            self.save()
             return speaker_id, "stranger", similarity
         if state != "provisional":
             return "unknown", "unknown", similarity
@@ -167,7 +202,11 @@ class SpeakerProfileStore:
         # (seen once in field data: three people merged into one "very consistent" profile).
         evidence = list(profile.get("evidence_similarity") or []) + [round(closest, 4)]
         profile["evidence_similarity"] = evidence[-8:]
-        if len(evidence) >= 2 and float(np.median(evidence)) > STRANGER_DEGENERATE_MEDIAN:
+        bodies = (list(profile.get("evidence_bodies") or []) + [self._body_entry(internal_id, visible_ids)])[-8:]
+        profile["evidence_bodies"] = bodies
+        if _body_conflict(bodies):
+            profile["lifecycle"] = "contested"
+        elif len(evidence) >= 2 and float(np.median(evidence)) > STRANGER_DEGENERATE_MEDIAN:
             profile["lifecycle"] = "frozen"
         elif (profile["samples"] >= STRANGER_PROMOTE_MIN_SAMPLES
               and profile["total_duration_ms"] >= STRANGER_PROMOTE_MIN_DURATION_MS):

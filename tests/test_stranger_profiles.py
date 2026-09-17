@@ -97,3 +97,81 @@ class StrangerTests(unittest.TestCase):
             self.assertFalse(store.add_verified_sample('a',[1,0,0],'b',.99,quality))
             with self.assertRaises(ValueError):store.enroll('a',[0,0,1],'owner')
             restored=SpeakerProfileStore(Path(tmp)/'pool.json');self.assertEqual(restored.match([1,0,0])[0],'a')
+
+
+class BodyEvidenceTests(unittest.TestCase):
+    """One voice profile must not keep absorbing utterances from two people the camera saw together."""
+
+    @staticmethod
+    def voice(sim):
+        t=float(np.arccos(sim));return [float(np.cos(t)),float(np.sin(t)),0.]
+
+    def test_two_visible_bodies_sharing_one_voice_contest_the_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=SpeakerProfileStore(Path(tmp)/'v.json')
+            s1=[1.,0.,0.];s2=[.85,float(np.sqrt(1-.85**2)),0.];s3=[.85,0.,float(np.sqrt(1-.85**2))]
+            store.remember_stranger(s1,duration_ms=5000,now_ms=1,internal_id='p1',visible_ids=['p1','p2'])
+            out=store.remember_stranger(s2,duration_ms=5000,now_ms=2,internal_id='p2',visible_ids=['p1','p2'])
+            sid=[k for k,v in store.profiles.items() if v.get('role')=='stranger'][0]
+            self.assertEqual(store.profiles[sid]['lifecycle'],'contested');self.assertEqual(out[0],'unknown')
+            # contested stays unpublished and stops growing
+            self.assertEqual(store.remember_stranger(s3,duration_ms=5000,now_ms=3,internal_id='p1',visible_ids=['p1'])[0],'unknown')
+            self.assertEqual(store.profiles[sid]['samples'],2)
+
+    def test_sequential_bodies_are_not_a_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=SpeakerProfileStore(Path(tmp)/'v.json')
+            s1=[1.,0.,0.];s2=[.85,float(np.sqrt(1-.85**2)),0.];s3=[.85,0.,float(np.sqrt(1-.85**2))]
+            store.remember_stranger(s1,duration_ms=5000,now_ms=1,internal_id='track7',visible_ids=['track7'])
+            store.remember_stranger(s2,duration_ms=5000,now_ms=2,internal_id='track9',visible_ids=['track9'])   # left and came back: new id
+            sid,role,_=store.remember_stranger(s3,duration_ms=5000,now_ms=3,internal_id='track9',visible_ids=['track9'])
+            self.assertEqual(role,'stranger');self.assertEqual(store.profiles[sid]['lifecycle'],'established')
+
+    def test_published_profile_is_withdrawn_when_a_second_body_hits_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=SpeakerProfileStore(Path(tmp)/'v.json')
+            s1=[1.,0.,0.];s2=[.85,float(np.sqrt(1-.85**2)),0.];s3=[.85,0.,float(np.sqrt(1-.85**2))]
+            for i,v in enumerate((s1,s2,s3)):sid,_,_=store.remember_stranger(v,duration_ms=5000,now_ms=i,internal_id='p1',visible_ids=['p1'])
+            self.assertEqual(store.profiles[sid]['lifecycle'],'established')
+            out=store.remember_stranger(s2,duration_ms=5000,now_ms=9,internal_id='p2',visible_ids=['p1','p2'])
+            self.assertEqual(out[0],'unknown');self.assertEqual(store.profiles[sid]['lifecycle'],'contested')
+            self.assertEqual(store.match(s2)[0],'unknown')
+
+    def test_unbound_utterances_never_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=SpeakerProfileStore(Path(tmp)/'v.json')
+            s1=[1.,0.,0.];s2=[.85,float(np.sqrt(1-.85**2)),0.];s3=[.85,0.,float(np.sqrt(1-.85**2))]
+            store.remember_stranger(s1,duration_ms=5000,now_ms=1)
+            store.remember_stranger(s2,duration_ms=5000,now_ms=2,internal_id='',visible_ids=['p1','p2'])
+            sid,role,_=store.remember_stranger(s3,duration_ms=5000,now_ms=3,internal_id='p1',visible_ids=['p1','p2'])
+            self.assertEqual(role,'stranger')
+
+
+class VisualBindingTests(unittest.TestCase):
+    def setUp(self):
+        from voice_detection.dashboard import bind_utterance_to_visible_person
+        self.bind=bind_utterance_to_visible_person
+
+    def test_bearing_picks_the_one_person_within_window(self):
+        people=[{'person_id':'a','azimuth_deg':-20.},{'person_id':'b','azimuth_deg':25.}]
+        out=self.bind({'direction_valid':True,'direction_deg':22.},people)
+        self.assertEqual((out['internal_id'],out['reason']),('b','bearing'));self.assertEqual(out['visible_ids'],['a','b'])
+
+    def test_two_at_bearing_needs_lips_to_choose(self):
+        people=[{'person_id':'a','azimuth_deg':0.,'lip_motion':False,'lip_motion_valid':True},
+                {'person_id':'b','azimuth_deg':8.,'lip_motion':True,'lip_motion_valid':True}]
+        self.assertEqual(self.bind({'direction_valid':True,'direction_deg':4.},people)['internal_id'],'b')
+        people[1]['lip_motion']=False
+        out=self.bind({'direction_valid':True,'direction_deg':4.},people)
+        self.assertEqual((out['internal_id'],out['reason']),('','several_at_bearing'))
+
+    def test_without_bearing_only_a_lone_lip_moving_person_binds(self):
+        lone=[{'person_id':'a','azimuth_deg':0.,'lip_motion':True,'lip_motion_valid':True}]
+        self.assertEqual(self.bind({'direction_valid':False},lone)['reason'],'only_person_lips')
+        lone[0]['lip_motion_valid']=False
+        self.assertEqual(self.bind({'direction_valid':False},lone)['internal_id'],'')
+        self.assertEqual(self.bind({'direction_valid':False},[])['reason'],'nobody_visible')
+
+    def test_vision_down_means_no_evidence_not_an_error(self):
+        from voice_detection.dashboard import fetch_vision_people
+        self.assertEqual(fetch_vision_people('http://127.0.0.1:1/api/state',timeout_s=.05),[])
