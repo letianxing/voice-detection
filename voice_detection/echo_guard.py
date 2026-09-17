@@ -1,4 +1,5 @@
 """Conservative attribution of ASR fragments matching contemporaneous robot playback."""
+import os
 import re
 from difflib import SequenceMatcher
 
@@ -13,7 +14,9 @@ def normalized(text):
 # when nothing was playing), and every transcript that was the robot hearing
 # itself came out between 0.457 and 0.758 (eight of them). A barge-in leaves
 # mostly the person's own signal behind, which is what pushes this down.
-ECHO_RESIDUAL = .45
+# VOICE_ECHO_RESIDUAL raises or lowers it: the separation above is thirteen
+# measurements from one session on one array, not a calibrated figure.
+ECHO_RESIDUAL = float(os.environ.get("VOICE_ECHO_RESIDUAL", ".45"))
 # Similarity to what was played, when the residual already says it is us. The
 # text bar alone has to be strict because it is the only evidence; with the
 # residual corroborating it, a couple of misheard characters under the robot's
