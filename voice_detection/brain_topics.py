@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def explicit_intent(text):
-    compact = re.sub(r"^(?:reachy|机器人|小圆|小园|小元)[，,。！!\s]*", "", text.strip(), flags=re.I).strip("，,。！!？? ")
+    compact = re.sub(r"^(?:reachy|机器人|小圆|小园|小元|小袁)[，,。！!\s]*", "", text.strip(), flags=re.I).strip("，,。！!？? ")
     for intent, phrases in {"follow": {"跟着我", "跟我来", "请跟着我"},
                             "stop": {"停止", "停下", "停止跟随", "别跟着我"},
                             "hello": {"你好", "嗨"}}.items():

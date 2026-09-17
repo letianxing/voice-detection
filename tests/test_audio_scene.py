@@ -11,6 +11,9 @@ class ReflexTests(unittest.TestCase):
             self.assertEqual(reflex.update(-65, stamp, None, 0), [])
         return reflex
 
+    def kinds(self, events):
+        return [event["kind"] for event in events]
+
     def test_loud_impulse_without_asr_triggers_once(self):
         reflex = self.warmed()
         # 40 ms of held level, as in the 30-50 ms bursts the startle literature
@@ -49,15 +52,28 @@ class ReflexTests(unittest.TestCase):
         for kwargs in ({"music": True}, {"echo": .95}):
             self.assertEqual(self.warmed().update(-8, 3000, 150, .95, **kwargs), [])
 
-    def test_orient_requires_sustained_valid_rear_direction(self):
-        reflex = self.warmed()
+    def test_a_sound_orients_whether_or_not_it_is_behind(self):
+        # Orienting is the cheap response — a novel sound turns the head. It used
+        # to fire only for sounds behind the robot, so with nobody in frame the
+        # only way to reach attention was loud enough to startle it.
+        behind = self.warmed()
         events = []
         for stamp in range(3000, 3200, 20):
-            events += reflex.update(-35, stamp, 140, .95)
+            events += behind.update(-35, stamp, 140, .95)
         self.assertEqual([event["kind"] for event in events], ["orient"])
+        self.assertTrue(events[0]["rear"])
+
+        unplaceable = self.warmed()
+        events = []
+        for stamp in range(3000, 3200, 20):
+            events += unplaceable.update(-35, stamp, None, 0)
+        self.assertEqual([event["kind"] for event in events], ["orient"])
+        self.assertFalse(events[0]["direction_valid"])
+
+    def test_quiet_room_noise_does_not_orient(self):
         reflex = self.warmed()
         for stamp in range(3000, 3400, 20):
-            self.assertEqual(reflex.update(-35, stamp, None, 0), [])
+            self.assertEqual(reflex.update(-50, stamp, None, 0), [], stamp)
 
 
 class MusicDSPTests(unittest.TestCase):
@@ -129,23 +145,27 @@ class DeviceGainTests(unittest.TestCase):
     def test_speech_on_a_quiet_array_is_not_a_startle_but_a_bang_is(self):
         # 2026-09-16 field measurement: floor -61, loudest speech frame -40.5.
         array = self.warmed(AcousticReflex(ReflexConfig(speech_peak_dbfs=-40.5)), -61)
+        speech = []
         for stamp in range(3000, 3100, 20):
-            self.assertEqual(array.update(-40.5, stamp, None, 0), [])
+            speech += array.update(-40.5, stamp, None, 0)
+        self.assertNotIn('startle', [event['kind'] for event in speech])
         held = []
         for stamp in range(4000, 4100, 20):
             held += array.update(-20, stamp, None, 0)
-        self.assertEqual(held[0]['kind'], 'startle')
+        self.assertIn('startle', [event['kind'] for event in held])
 
     def test_the_same_level_is_only_speech_on_a_louder_device(self):
         # -25 dBFS is a bang on the array and an ordinary sentence on this one,
         # which is the whole reason the gate cannot be one number.
         builtin = self.warmed(AcousticReflex(), -61)
+        speech = []
         for stamp in range(3000, 3200, 20):
-            self.assertEqual(builtin.update(-20, stamp, None, 0), [])  # 阵列上的巨响，这里只是说话
+            speech += builtin.update(-20, stamp, None, 0)  # 阵列上的巨响，这里只是说话
+        self.assertNotIn('startle', [event['kind'] for event in speech])
         held = []
         for stamp in range(4000, 4100, 20):
             held += builtin.update(-6, stamp, None, 0)
-        self.assertEqual(held[0]['kind'], 'startle')
+        self.assertIn('startle', [event['kind'] for event in held])
 
     def test_profile_carries_the_measured_level_into_both_gates(self):
         from voice_detection.profiles import get_profile

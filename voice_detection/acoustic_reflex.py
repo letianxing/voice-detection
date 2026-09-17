@@ -45,6 +45,11 @@ STARTLE_SUSTAIN_MS = 40
 # A sound near full scale is the loudest thing this device can report, so it
 # stays a startle however loud the room has trained the reference to be.
 STARTLE_CEILING_DBFS = -3.
+# Orienting sits below the level of speech, not above it: the point is to notice
+# somebody talking or knocking out of frame, not to survive a bang. The real
+# discriminator here is the 8 dB rise above the adaptive noise floor; this is
+# only a bound so that a very quiet room cannot orient on its own hiss.
+SPEECH_TO_ORIENT_DB = -18.
 
 
 @dataclass
@@ -67,6 +72,14 @@ class ReflexConfig:
     orient_delta_db: float = 8.
     orient_hold_ms: int = 120
     rear_boundary_deg: float = 100.
+    # Orienting is not startle. A novel sound turns the head; that response is
+    # cheap, frequent and habituates (Sokolov's orienting reflex), while startle
+    # is defensive and has to stay rare. Tightening startle left nothing between
+    # them, so with no face in view only a hard clap reached attention at all.
+    # Floor is below speech rather than above it: someone talking off-camera is
+    # exactly what should pull attention.
+    orient_min_dbfs: float | None = None
+    orient_refractory_ms: int = int(_tuned('VOICE_ORIENT_REFRACTORY_MS', 2000))
 
     def __post_init__(self):
         if self.min_startle_dbfs is None:
@@ -75,6 +88,9 @@ class ReflexConfig:
         if self.immediate_startle_dbfs is None:
             self.immediate_startle_dbfs = _tuned('VOICE_STARTLE_IMMEDIATE_DBFS',
                                                  self.speech_peak_dbfs + SPEECH_TO_IMMEDIATE_DB)
+        if self.orient_min_dbfs is None:
+            self.orient_min_dbfs = _tuned('VOICE_ORIENT_MIN_DBFS',
+                                          self.speech_peak_dbfs + SPEECH_TO_ORIENT_DB)
 
 
 def config_for_profile(profile):
@@ -144,12 +160,19 @@ class AcousticReflex:
                            "direction_valid": direction is not None, "delta_db": round(delta, 2),
                            "floor_dbfs": round(floor, 1), "held_ms": cfg.sustain_ms})
         rear = direction is not None and direction_confidence >= .45 and abs(direction) >= cfg.rear_boundary_deg
-        if not warming and clean and not music and rear and delta >= cfg.orient_delta_db and dbfs >= -45:
+        orienting = (not warming and clean and not music and delta >= cfg.orient_delta_db
+                     and dbfs >= cfg.orient_min_dbfs)
+        if orienting:
             if self.orient_since is None:
                 self.orient_since = stamp_ms
-            if stamp_ms - self.orient_since >= cfg.orient_hold_ms and stamp_ms - self.last_orient >= cfg.refractory_ms:
+            # Something behind us is worth a slower, more certain commitment; in
+            # front the sound only has to hold long enough not to be a click.
+            refractory = cfg.refractory_ms if rear else cfg.orient_refractory_ms
+            if stamp_ms - self.orient_since >= cfg.orient_hold_ms and stamp_ms - self.last_orient >= refractory:
                 self.last_orient = stamp_ms
-                events.append({"kind": "orient", "stamp_ms": stamp_ms, "direction_deg": direction, "direction_valid": True})
+                events.append({"kind": "orient", "stamp_ms": stamp_ms, "direction_deg": direction,
+                               "direction_valid": direction is not None, "rear": bool(rear),
+                               "delta_db": round(delta, 2)})
         else:
             self.orient_since = None
         return events

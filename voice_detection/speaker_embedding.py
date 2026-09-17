@@ -101,10 +101,15 @@ class SpeakerProfileStore:
         self.enroll(speaker_id, embedding, "stranger")
         return speaker_id, "stranger", 1.0
 
-    def enroll(self, speaker_id: str, embedding: list[float], role: str = "known", enrollment_text: str = "") -> None:
-        with self.lock:self._enroll(speaker_id,embedding,role,enrollment_text)
+    def enroll(self, speaker_id: str, embedding: list[float], role: str = "known", enrollment_text: str = "",
+               anchor_floor: float = .55) -> None:
+        """anchor_floor is lowered only when something outside the voice — a
+        confident face on the same utterance — already says who this is. A pool
+        enrolled at one distance cannot otherwise learn the same person at
+        another, which is exactly how the owner became a stranger in the field."""
+        with self.lock:self._enroll(speaker_id,embedding,role,enrollment_text,anchor_floor)
 
-    def _enroll(self,speaker_id,embedding,role,enrollment_text):
+    def _enroll(self,speaker_id,embedding,role,enrollment_text,anchor_floor=.55):
         vector=self._unit(embedding)
         if vector is None:raise ValueError("invalid speaker embedding")
         embedding=vector.tolist()
@@ -112,9 +117,11 @@ class SpeakerProfileStore:
         aliases=list(previous.get("aliases",[]))
         pool=list(previous.get("embeddings") or ([previous["embedding"]] if previous.get("embedding") else []))
         if pool and any(self._unit(v) is None or len(v)!=len(vector) for v in pool):raise ValueError("speaker pool dimension mismatch")
-        if pool and float(np.dot(vector,self._unit(pool[0])))<.55:
+        if pool and float(np.dot(vector,self._unit(pool[0])))<anchor_floor:
             raise ValueError("voice sample too far from original identity anchor")
-        if pool and max(float(np.dot(vector,self._unit(v))) for v in pool if self._unit(v) is not None and len(v)==len(vector))<.6:
+        if pool and max(float(np.dot(vector,self._unit(v))) for v in pool if self._unit(v) is not None and len(v)==len(vector))<min(.6,anchor_floor):
+            # Both guards move together: when a confident face has already said
+            # who this is, "too unlike the pool" has to mean a lot more unlike.
             raise ValueError("existing identity voice samples disagree; refusing overwrite")
         if not pool or max(float(np.dot(vector,self._unit(v))) for v in pool if self._unit(v) is not None and len(v)==len(vector))<.985:
             pool=(pool[:1]+pool[-6:]+[embedding]) if len(pool)>=8 else pool+[embedding]
@@ -165,22 +172,61 @@ class SpeakerProfileStore:
     def match(self, embedding: list[float], threshold: float = .48) -> tuple[str,str,float]:
         ranked=self.rank(embedding)
         if not ranked:return 'unknown','unknown',0.
-        best=ranked[0];margin=best['score']-(ranked[1]['score'] if len(ranked)>1 else 0.)
+        best=ranked[0]
+        # The margin exists so two enrolled people are never confused. An
+        # auto-created stranger cluster is not a second person — it is usually
+        # this same person recorded at another angle, and in the field nine of
+        # them piled up and started blocking the owner's own match: every miss
+        # created another cluster, which made the next match harder. Strangers
+        # therefore do not compete against a named identity.
+        if best['role']=='stranger':
+            # A named identity within a hair of an unnamed cluster is the better
+            # answer: the cluster has no history and is usually this same person
+            # from another angle, and calling them by name is what lets the two
+            # merge later.
+            named=next((row for row in ranked if row['role'] in {'owner','known'}),None)
+            if named and named['score']>=threshold and best['score']-named['score']<=.08:
+                best=named
+        rivals=[row for row in ranked if row is not best and (best['role']=='stranger' or row['role']!='stranger')]
+        margin=best['score']-(rivals[0]['score'] if rivals else 0.)
         if best['score']<threshold or margin<.06:return 'unknown','unknown',best['score']
         return best['speaker_id'],best['role'],best['score']
 
+    # How unlike the enrolled pool a face-confirmed sample may be and still join.
+    # Not zero: a confident face on a badly segmented utterance must not be able
+    # to put anybody's voice into this pool.
+    FACE_VERIFIED_FLOOR = .35
+
     def add_verified_sample(self,identity,embedding,face_identity,face_confidence,quality):
-        # Trusted, contemporaneous AV confirmation is mandatory; no self-training
-        # solely from a previous nearest-neighbor voice guess.
+        """Learn this person's voice from an utterance the face already identified.
+
+        The old rule also required the voiceprint to score .7 against the pool it
+        was supposed to be extending, so a pool enrolled face-on at half a metre
+        could never learn the same person leaning back in a chair — and in the
+        field it never did: the owner scored 0.0 off-axis and was filed as a new
+        stranger, which then made the next match harder still.
+
+        The face is the independent evidence. The voice only has to not
+        contradict it: no other enrolled person may claim this sample, and it
+        must be at least vaguely this person. The audio quality bar stays where
+        it was — overlapped or echoing speech teaches the pool the room, not the
+        person."""
         if identity!=face_identity or face_confidence<.8 or quality.get('overlap',1)>.15 or quality.get('echo',1)>.2 or quality.get('duration_ms',0)<2000:
             return False
         with self.lock:
             profile=self.profiles.get(identity)
             if not profile or profile.get('role') not in {'owner','known'}:return False
             ranked=self.rank(embedding)
-            if not ranked or ranked[0]['speaker_id']!=identity or ranked[0]['score']<.7:return False
-            if len(ranked)>1 and ranked[0]['score']-ranked[1]['score']<.12:return False
-            self.enroll(identity,embedding,profile['role'],profile.get('enrollment_text',''))
+            named=[row for row in ranked if row['role'] in {'owner','known'}]
+            if named and named[0]['speaker_id']!=identity and named[0]['score']>=.6:
+                return False   # the voiceprint names a different enrolled person; that is a conflict, not a sample
+            score=next((row['score'] for row in ranked if row['speaker_id']==identity),0.)
+            if score<self.FACE_VERIFIED_FLOOR:return False
+            try:
+                self.enroll(identity,embedding,profile['role'],profile.get('enrollment_text',''),
+                            anchor_floor=self.FACE_VERIFIED_FLOOR)
+            except ValueError:
+                return False
             return True
 
 
