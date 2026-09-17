@@ -5,6 +5,7 @@ import uuid
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +68,50 @@ class SpeakerEmbedder:
 
 
 class SpeakerProfileStore:
+    """Enrolled voices, and the decision about whether this one is any of them.
+
+    Raw cosine is not a transferable measure. Measured on this machine over 70
+    recordings from one field session, every ERes2NetV2 embedding carries a
+    large common component — mean cosine 0.62 against the cohort mean, and mean
+    0.38 between clips of *different* people — so an absolute 0.48 bar rejects
+    the owner as soon as the distance, gain or room changes, which is exactly
+    what it did. The transferable question is how far above the imposter cohort
+    this score stands (AS-norm: Matejka et al., "Analysis of Score
+    Normalization in Multilingual Speaker Recognition", Interspeech 2017).
+
+    So there are two ways to be named: an absolute cosine high enough to speak
+    for itself, or a score that stands clearly above the other voices this
+    machine knows. Both still need a margin over the runner-up, and neither can
+    fire below RAW_FLOOR — a normalised score built on noise is still noise.
+    """
+
+    MATCH_THRESHOLD = .48    # absolute cosine that names somebody on its own
+    RAW_FLOOR = .34          # nobody is named below this, whatever the z score
+    Z_FLOOR = 2.2            # standard deviations above the imposter cohort
+    MARGIN_FLOOR = .06       # over the runner-up, so two enrolled people never swap
+    COHORT_TOP_K = 10        # adaptive cohort size
+    COHORT_MIN = 6           # fewer known voices than this and z means nothing
+    SIGMA_FLOOR = .03        # keeps a tight cohort from manufacturing huge z
+
     def __init__(self, path: str | Path):
         self.lock=threading.RLock()
         self.path = Path(path).expanduser()
         self.profiles: dict[str, dict[str, Any]] = {}
+        self.thresholds = {"threshold": self.MATCH_THRESHOLD, "raw_floor": self.RAW_FLOOR,
+                           "z_floor": self.Z_FLOOR, "margin_floor": self.MARGIN_FLOOR}
+        self.last_decision: dict[str, Any] = {}
+        # Face-verified samples waiting for a second opinion. In memory only:
+        # a sample nothing has corroborated yet does not belong on disk.
+        self.pending: dict[str, list] = {}
         self.load()
+
+    def tune(self, **values) -> dict[str, float]:
+        """Live threshold changes from the panel; unknown names are ignored."""
+        with self.lock:
+            for name, value in values.items():
+                if name in self.thresholds and value is not None:
+                    self.thresholds[name] = float(value)
+            return dict(self.thresholds)
 
     def load(self) -> None:
         try:
@@ -90,16 +130,33 @@ class SpeakerProfileStore:
             finally:
                 if os.path.exists(name):os.unlink(name)
 
+    # How many auto-created clusters may exist at once. Unbounded, they became
+    # the problem they were meant to solve: twenty singleton clusters from one
+    # session, each one another rival in the margin test, so every miss made
+    # the next match harder.
+    MAX_STRANGERS = 12
+
     def remember_stranger(self, embedding):
         speaker_id, role, similarity = self.match(embedding)
         if speaker_id != "unknown":
             return speaker_id, role, similarity
         ranked=self.rank(embedding)
-        if ranked and ranked[0]["score"]>=.48:
+        if ranked and ranked[0]["score"]>=self.thresholds["threshold"]:
             return "unknown","unknown",ranked[0]["score"]
         speaker_id = "stranger_" + uuid.uuid4().hex[:12]
         self.enroll(speaker_id, embedding, "stranger")
+        with self.lock:
+            self._prune_strangers()
         return speaker_id, "stranger", 1.0
+
+    def _prune_strangers(self):
+        strangers=[(key,profile) for key,profile in self.profiles.items() if profile.get("role")=="stranger"]
+        if len(strangers)<=self.MAX_STRANGERS:
+            return
+        strangers.sort(key=lambda item:(int(item[1].get("last_heard_ms") or 0),int(item[1].get("created_ms") or 0)))
+        for key,_ in strangers[:len(strangers)-self.MAX_STRANGERS]:
+            self.profiles.pop(key,None)
+        self.save()
 
     def enroll(self, speaker_id: str, embedding: list[float], role: str = "known", enrollment_text: str = "",
                anchor_floor: float = .55) -> None:
@@ -133,17 +190,72 @@ class SpeakerProfileStore:
                     old.clear()
                     old.update(canonical_id=str(speaker_id),role="alias")
                     aliases.append(old_id)
+        now_ms=int(time.time()*1000)
         self.profiles[str(speaker_id)] = {
             "aliases": aliases,
             "role": str(role or "known"),
+            "created_ms": int(previous.get("created_ms") or now_ms),
+            "last_heard_ms": now_ms,
+            # Nobody can read stranger_c3b41448ec74 off a screen and tell which
+            # voice in the room it is. The ordinal is assigned once and kept.
+            "display_name": previous.get("display_name") or (
+                self._next_stranger_name() if str(role or "")=="stranger" else str(speaker_id)),
             "embedding": pool[0],
             "embeddings": pool,
+            "anchor_groups": int(previous.get("anchor_groups") or 1),
             "pool_version": 1,
             "reference_path":previous.get("reference_path"),
             "model": "3dspeaker-eres2netv2-zh-cn",
             "enrollment_text": enrollment_text,
         }
         self.save()
+
+    def _next_stranger_name(self):
+        used={str(profile.get("display_name") or "") for profile in self.profiles.values()}
+        ordinal=1
+        while f"陌生人{ordinal}" in used:
+            ordinal+=1
+        return f"陌生人{ordinal}"
+
+    def display_name(self,speaker_id):
+        """What to put on a screen for this voice."""
+        profile=self.profiles.get(str(speaker_id)) or {}
+        if profile.get("role")=="alias" and profile.get("canonical_id"):
+            return self.display_name(profile["canonical_id"])
+        return str(profile.get("display_name") or speaker_id or "unknown")
+
+    def merge_cluster(self,cluster_id,identity):
+        """Fold an auto-created cluster into an enrolled person's pool.
+
+        The user's rule: every new voice gets registered, but a voice that
+        turns out to belong to somebody already enrolled has to end up in that
+        person's pool rather than living on as a rival. The claim comes from
+        outside the voiceprint — a confident face on the same utterance — and
+        every sample still passes the enrolment guards, so a mistaken face
+        cannot rewrite an identity, only fail to extend it.
+        """
+        with self.lock:
+            cluster=self.profiles.get(str(cluster_id))
+            target=self.profiles.get(str(identity))
+            if not cluster or not target or cluster.get("role")!="stranger":
+                return False
+            if target.get("role") not in {"owner","known"}:
+                return False
+            samples=[v for v in (cluster.get("embeddings") or [cluster.get("embedding")]) if v]
+            merged=0
+            for sample in samples:
+                try:
+                    self._enroll(identity,sample,target.get("role","known"),
+                                 target.get("enrollment_text",""),anchor_floor=self.FACE_VERIFIED_FLOOR)
+                    merged+=1
+                except ValueError:
+                    continue
+            aliases=sorted(set(list(self.profiles[str(identity)].get("aliases",[]))+[str(cluster_id)]))
+            self.profiles[str(identity)]["aliases"]=aliases
+            self.profiles[str(cluster_id)]={"canonical_id":str(identity),"role":"alias",
+                                            "merged_samples":merged}
+            self.save()
+            return True
 
     @staticmethod
     def _unit(embedding):
@@ -167,11 +279,41 @@ class SpeakerProfileStore:
                     scores.sort(reverse=True)
                     score=scores[0] if len(scores)==1 else .75*scores[0]+.25*scores[1]
                     ranked.append({'speaker_id':identity,'role':profile.get('role','known'),'score':score,'pool_size':len(scores)})
-        return sorted(ranked,key=lambda x:x['score'],reverse=True)
+        ranked=sorted(ranked,key=lambda x:x['score'],reverse=True)
+        return self._normalize(ranked)
 
-    def match(self, embedding: list[float], threshold: float = .48) -> tuple[str,str,float]:
+    def _normalize(self,ranked):
+        """Adaptive score normalisation:每个候选相对于其余已知声音的位置。
+
+        The cohort is everybody else this machine knows, strangers included —
+        auto-created clusters are the closest thing available to an imposter
+        set, and using them is what makes the number comparable across
+        recordings taken at different distances and gains.
+        """
+        for row in ranked:
+            cohort=sorted((other['score'] for other in ranked if other is not row),reverse=True)[:self.COHORT_TOP_K]
+            if len(cohort)<self.COHORT_MIN:
+                row['z']=None
+                row['cohort']={'size':len(cohort)}
+                continue
+            mean=float(np.mean(cohort));std=max(float(np.std(cohort)),self.SIGMA_FLOOR)
+            row['z']=round((row['score']-mean)/std,2)
+            row['cohort']={'size':len(cohort),'mean':round(mean,3),'std':round(std,3)}
+        return ranked
+
+    def identify(self, embedding: list[float], threshold: float | None = None) -> dict[str, Any]:
+        """The decision with its reasoning attached, for the panel and the logs."""
+        self.match(embedding, threshold)
+        return dict(self.last_decision)
+
+    def match(self, embedding: list[float], threshold: float | None = None) -> tuple[str,str,float]:
         ranked=self.rank(embedding)
-        if not ranked:return 'unknown','unknown',0.
+        with self.lock:
+            tuned=dict(self.thresholds)
+        threshold=float(tuned['threshold'] if threshold is None else threshold)
+        if not ranked:
+            self.last_decision={'speaker_id':'unknown','reason':'no_enrolled_voice','thresholds':tuned}
+            return 'unknown','unknown',0.
         best=ranked[0]
         # The margin exists so two enrolled people are never confused. An
         # auto-created stranger cluster is not a second person — it is usually
@@ -189,7 +331,23 @@ class SpeakerProfileStore:
                 best=named
         rivals=[row for row in ranked if row is not best and (best['role']=='stranger' or row['role']!='stranger')]
         margin=best['score']-(rivals[0]['score'] if rivals else 0.)
-        if best['score']<threshold or margin<.06:return 'unknown','unknown',best['score']
+        z=best.get('z')
+        absolute=best['score']>=threshold
+        normalized=best['score']>=tuned['raw_floor'] and z is not None and z>=tuned['z_floor']
+        self.last_decision={'speaker_id':best['speaker_id'],'role':best['role'],
+                            'score':round(float(best['score']),3),'z':z,'margin':round(float(margin),3),
+                            'pool_size':best.get('pool_size'),'cohort':best.get('cohort'),
+                            'thresholds':tuned,
+                            'path':'absolute' if absolute else ('cohort_normalized' if normalized else 'none'),
+                            'runner_up':rivals[0]['speaker_id'] if rivals else None}
+        if not (absolute or normalized):
+            self.last_decision.update(speaker_id='unknown',
+                                      reason='below_absolute_and_cohort_bars' if z is not None else 'below_absolute_bar_no_cohort')
+            return 'unknown','unknown',best['score']
+        if margin<tuned['margin_floor']:
+            self.last_decision.update(speaker_id='unknown',reason='another_voice_scores_almost_the_same')
+            return 'unknown','unknown',best['score']
+        self.last_decision['reason']='named'
         return best['speaker_id'],best['role'],best['score']
 
     # How unlike the enrolled pool a face-confirmed sample may be and still join.
@@ -221,13 +379,53 @@ class SpeakerProfileStore:
             if named and named[0]['speaker_id']!=identity and named[0]['score']>=.6:
                 return False   # the voiceprint names a different enrolled person; that is a conflict, not a sample
             score=next((row['score'] for row in ranked if row['speaker_id']==identity),0.)
-            if score<self.FACE_VERIFIED_FLOOR:return False
+            if score<self.FACE_VERIFIED_FLOOR:
+                return self._second_opinion(identity,embedding)
             try:
                 self.enroll(identity,embedding,profile['role'],profile.get('enrollment_text',''),
                             anchor_floor=self.FACE_VERIFIED_FLOOR)
             except ValueError:
-                return False
+                return self._second_opinion(identity,embedding)
             return True
+
+    # Two face-verified samples that agree with each other open a second anchor
+    # group. Measured reason: the owner's enrolment is one 2.7 s clip recorded
+    # at -51 dBFS, and his live sentences through the other microphone scored
+    # 0.083 against it — rank 18 of 21. No threshold can rescue that, and a
+    # single confident face is not enough to let a voice into somebody's
+    # identity. Two samples from confident faces that also match each other
+    # are: they agree about the person and about the channel.
+    SECOND_OPINION_AGREEMENT = .5
+    SECOND_OPINION_WINDOW_MS = 600000
+
+    def _second_opinion(self,identity,embedding):
+        vector=self._unit(embedding)
+        if vector is None:
+            return False
+        now=int(time.time()*1000)
+        waiting=[(when,held) for when,held in self.pending.get(identity,[]) if now-when<=self.SECOND_OPINION_WINDOW_MS]
+        for when,held in waiting:
+            other=self._unit(held)
+            if other is None or other.shape!=vector.shape:
+                continue
+            if float(np.dot(vector,other))>=self.SECOND_OPINION_AGREEMENT:
+                self.pending[identity]=[]
+                return self._admit_anchor_group(identity,[held,vector.tolist()])
+        self.pending[identity]=(waiting+[(now,vector.tolist())])[-4:]
+        return False
+
+    def _admit_anchor_group(self,identity,vectors):
+        """Add samples the existing anchor cannot reach, as their own anchor."""
+        profile=self.profiles.get(identity)
+        if not profile:
+            return False
+        pool=list(profile.get("embeddings") or [profile.get("embedding")])
+        pool=[v for v in pool if v]+list(vectors)
+        profile["embeddings"]=pool[:1]+pool[-7:] if len(pool)>8 else pool
+        profile["anchor_groups"]=int(profile.get("anchor_groups") or 1)+1
+        profile["last_heard_ms"]=int(time.time()*1000)
+        self.save()
+        return True
 
 
 def resample(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:

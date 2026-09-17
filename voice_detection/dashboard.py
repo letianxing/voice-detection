@@ -28,7 +28,8 @@ from .streaming_asr import AsrWorker, UtteranceSegmenter
 from .utterance_finalizer import UtteranceFinalizer
 from .target_speaker import create_target_speaker_extractor
 from .speaker_embedding import SpeakerEmbedder, SpeakerProfileStore
-from .speaker_tracks import MixedAudioRing, SpeakerTracker
+from .speaker_tracks import (AuditoryAttentionTarget, MixedAudioRing, SpeakerReferenceResolver,
+                             SpeakerTracker)
 
 
 INDEX_HTML = """<!doctype html>
@@ -149,13 +150,26 @@ class LiveMonitor:
         self._last_partial_text = ""
         self._finalizer = None
         self._capture_generation = 0
+        # A capture request outlives one failed attempt: the array drops off the
+        # USB bus mid-session and has to be able to come back by itself.
+        self.desired: dict[str, object] | None = None
+        self._supervisor: threading.Thread | None = None
+        self.retry_count = 0
+        self.reopen_count = 0
+        self._dead_channel_strikes = 0
+        self._last_reopen_ms = 0
+        self.capture_warning = ""
         self.last_transcript: dict[str, object] | None = None
         self.last_streaming_transcript: dict[str, object] | None = None
         # Declared here so the state endpoint works before capture has started.
         self.audio_ring = None
         self.speaker_tracker = None
+        self.reference_resolver = None
+        # Who attention has told us to listen to. The ear does not choose.
+        self.attention_target = AuditoryAttentionTarget()
         self.speaker_error = ""
         self._speaker_context = None
+        self._speech_frames = deque(maxlen=400)
         self._speaker_worker = None
         self._speaker_stop = threading.Event()
         self._streaming_asr = None
@@ -182,7 +196,83 @@ class LiveMonitor:
             self.ros = BrainRosPublisher(self.state, os.environ["VOICE_ROSBRIDGE_URL"])
 
     def start(self, profile_id: str, device: str, seconds: float, tse_mode: str = "baseline") -> None:
+        """Ask for capture and keep asking while the device is not there.
+
+        A USB array that drops off the bus used to leave this permanently dead:
+        the request failed once, the panel showed a PortAudio number, and the
+        service sat there with no microphone until somebody restarted it by
+        hand. The request is now a standing one — plugging the array back in
+        brings capture back without touching the service.
+        """
         self.stop()
+        with self.lock:
+            self.desired = {"profile": str(profile_id), "device": str(device),
+                            "seconds": float(seconds or 0), "tse": str(tse_mode or "baseline")}
+        self._start_once(profile_id, device, seconds, tse_mode)
+        if not self.running:
+            self._ensure_supervisor()
+
+    def _ensure_supervisor(self) -> None:
+        if self._supervisor is not None and self._supervisor.is_alive():
+            return
+        self._supervisor = threading.Thread(target=self._supervise, daemon=True)
+        self._supervisor.start()
+
+    def _supervise(self, interval_s: float = 3.0) -> None:
+        """Keep a standing capture request true: retry it, and repair it."""
+        while True:
+            time.sleep(interval_s)
+            with self.lock:
+                wanted = dict(self.desired) if self.desired else None
+                running = self.running
+            if wanted is None:
+                return
+            if running:
+                self._repair_dead_channels(wanted)
+                continue
+            refresh_audio_devices()
+            self.retry_count += 1
+            self._start_once(wanted["profile"], wanted["device"], wanted["seconds"], wanted["tse"])
+
+    # An array stream opened at the wrong moment — right after the device
+    # re-enumerated on USB — delivers channel 0 and digital silence on the rest.
+    # Nothing recovers by itself: direction, beamforming and array echo
+    # cancellation stay off for the whole session, and the only sign is one line
+    # of warning text. Reopening the stream fixed it every time it happened, so
+    # the service now does that instead of the person at the keyboard.
+    DEAD_CHANNEL_STRIKES = 2
+    REOPEN_INTERVAL_MS = 60000
+
+    def _repair_dead_channels(self, wanted) -> None:
+        if self.scene is None or not getattr(self.scene.profile, "supports_raw_multichannel", False):
+            return
+        levels = ((self.scene.snapshot().get("acoustic") or {}).get("channel_rms")) or []
+        if len(levels) < 2:
+            return
+        loudest = max(levels)
+        if loudest <= 1e-4:
+            self._dead_channel_strikes = 0
+            return
+        alive = sum(1 for level in levels if level > loudest * .01)
+        if alive > 1:
+            self._dead_channel_strikes = 0
+            return
+        self._dead_channel_strikes += 1
+        if self._dead_channel_strikes < self.DEAD_CHANNEL_STRIKES:
+            return
+        if self._last_reopen_ms and now_ms() - self._last_reopen_ms < self.REOPEN_INTERVAL_MS:
+            return
+        self._dead_channel_strikes = 0
+        self._last_reopen_ms = now_ms()
+        self.reopen_count += 1
+        self._teardown()
+        refresh_audio_devices()
+        self._start_once(wanted["profile"], wanted["device"], wanted["seconds"], wanted["tse"])
+        with self.lock:
+            self.capture_warning = (f"阵列只有 1 个通道有信号，已第 {self.reopen_count} 次重开采集流恢复多通道；"
+                                    f"设备刚插上时打开的流会出现这种状态。")
+
+    def _start_once(self, profile_id: str, device: str, seconds: float, tse_mode: str = "baseline") -> None:
         self.asr_error = ""
         try:
             import numpy as np
@@ -265,6 +355,9 @@ class LiveMonitor:
         self.audio_ring = MixedAudioRing(16000, float(os.environ.get("VOICE_RING_SECONDS", "30")))
         self.speaker_tracker = SpeakerTracker(self.speaker_embedder, self.speaker_profiles) \
             if self.speaker_embedder is not None else None
+        self.reference_resolver = SpeakerReferenceResolver(
+            self.speaker_profiles, Path(__file__).resolve().parents[1]/"config"/"speaker_references"/"session",
+            self.audio_ring)
         self._speaker_worker = None
         self._asr_worker = AsrWorker(adapter, self._on_transcript, self._on_asr_error, self._preprocess_tse_audio)
         self._finalizer = UtteranceFinalizer(self._finalize_utterance, self._on_asr_error)
@@ -289,6 +382,15 @@ class LiveMonitor:
                 "max_input_channels": int(info["max_input_channels"]),
                 "default_samplerate": float(info["default_samplerate"]),
             }
+            # Capturing an eight-microphone array through the single-channel
+            # laptop profile is silently legal and throws away everything the
+            # array is for: no beamforming, no direction, no array AEC. It
+            # happened in the field and nothing said so.
+            spare = int(info["max_input_channels"]) - int(profile.input_channels)
+            self.capture_warning = (
+                f"所选设备 {info['name']} 有 {int(info['max_input_channels'])} 个输入通道，"
+                f"当前配置 {profile_id} 只用 {int(profile.input_channels)} 个：波束形成、声源方向、阵列回声抑制都不会生效。"
+                if spare >= 4 else "")
         except Exception as exc:
             # "No input device matching 'MicArray'" on its own reads like a
             # configuration mistake, and the first thing anyone then checks is
@@ -325,6 +427,12 @@ class LiveMonitor:
                 self.audio_ring.append(resample_mono(output.target_audio, frame.sample_rate_hz, 16000), frame.stamp_ms)
             if output.vad_active:
                 self._speaker_context = (frame.stamp_ms, output.tracks[0].azimuth_deg if output.tracks else None, echo)
+                # How much of the recent audio was actually speech. A window
+                # that is mostly room tells the tracker about the room: with a
+                # stale context and no check, a quiet room produced two dozen
+                # "speaker" windows and kept them under whichever name was
+                # matched first.
+                self._speech_frames.append((frame.stamp_ms, int(frame.samples.shape[0] * 1000 / frame.sample_rate_hz)))
             if output.vad_active:
                 self._utterance_echo.append(echo)
                 self._utterance_echo = self._utterance_echo[-1500:]
@@ -432,11 +540,20 @@ class LiveMonitor:
         except Exception as exc:
             with self.lock:
                 self.running = False
-                self.error = str(exc)
-            self.stop()
+                self.error = open_failure_message(exc, device_arg, profile.input_channels)
+            self._teardown()
+
+    # A window has to be mostly somebody talking. Measured: 1.5 s windows of
+    # the owner's own voice score 0.75-0.90 against his pool, 0.6 s windows
+    # anywhere from 0.11 to 0.71 — and a window of room noise scores against
+    # whatever it likes.
+    SPEECH_IN_WINDOW_MS = 800
+
+    def _speech_ms_within(self, start_ms, end_ms):
+        return sum(length for stamp, length in list(self._speech_frames) if start_ms <= stamp <= end_ms)
 
     def _track_speakers(self):
-        """One embedding every 300 ms of speech, off the audio callback."""
+        """One embedding per hop of speech, off the audio callback."""
         while not self._speaker_stop.wait(.05):
             tracker, context = self.speaker_tracker, self._speaker_context
             if tracker is None or context is None:
@@ -444,10 +561,21 @@ class LiveMonitor:
             stamp_ms, azimuth, echo = context
             if not tracker.due(stamp_ms):
                 continue
+            if now_ms() - stamp_ms > max(400, tracker.hop_ms):
+                # Speech stopped. The context is the last thing that was said,
+                # not what the microphone is hearing now.
+                continue
+            if self._speech_ms_within(stamp_ms - tracker.window_ms, stamp_ms) < self.SPEECH_IN_WINDOW_MS:
+                continue
             window, end_ms = self.audio_ring.window(tracker.window_ms)
             if window.size:
                 try:
-                    tracker.observe(window, end_ms or stamp_ms, azimuth, echo)
+                    track = tracker.observe(window, end_ms or stamp_ms, azimuth, echo)
+                    if track is not None and self.reference_resolver is not None and not track.reference_path:
+                        # Capture a reference as they talk. Nobody should have to
+                        # enrol before the robot can follow them in a crowd.
+                        overlap = float((self.last_track or {}).get("overlap_probability") or 0)
+                        self.reference_resolver.capture(track, {"overlap": overlap, "echo": echo}, write_wav)
                 except Exception as exc:
                     with self.lock:
                         self.speaker_error = str(exc)
@@ -531,6 +659,12 @@ class LiveMonitor:
             asr_worker.submit(utterance)
 
     def stop(self) -> None:
+        """A stop from outside also withdraws the standing capture request."""
+        with self.lock:
+            self.desired = None
+        self._teardown()
+
+    def _teardown(self) -> None:
         self._capture_generation += 1
         self._speaker_stop.set()
         worker, self._speaker_worker = self._speaker_worker, None
@@ -577,9 +711,32 @@ class LiveMonitor:
                 "audio_scene": self.scene.snapshot() if self.scene else {"running": False, "music": empty_music("capture_stopped")},
                 "ros": self.ros.status() if self.ros else {"enabled": False},
                 "error": self.error,
+                "capture_warning": self.capture_warning,
+                "capture_request": self.desired,
+                "capture_retries": self.retry_count,
+                "capture_reopens": self.reopen_count,
                 "last_track": self.last_track,
                 "speakers": self.speaker_tracker.state(now_ms()) if self.speaker_tracker else
                             {"speakers": [], "active": [], "reason": "no_speaker_model"},
+                "attention_target": self.attention_target.current(now_ms()),
+                # Who is registered, under what name, and how much voice each
+                # pool actually holds — the console cannot show "陌生人3 说了…"
+                # without it, and pool sizes are the first thing to look at
+                # when somebody is not being recognised.
+                "voice_registry": {
+                    key: {"display_name": self.speaker_profiles.display_name(key),
+                          "role": profile.get("role"),
+                          "pool_size": len(profile.get("embeddings") or ([profile["embedding"]] if profile.get("embedding") else [])),
+                          "anchor_groups": int(profile.get("anchor_groups") or 1),
+                          "aliases": profile.get("aliases", []),
+                          "has_reference": bool(profile.get("reference_path"))}
+                    for key, profile in (self.speaker_profiles.profiles.items() if self.speaker_profiles else {}.items())
+                    if profile.get("role") != "alias"
+                },
+                "speaker_thresholds": dict(self.speaker_profiles.thresholds) if self.speaker_profiles else {},
+                "speaker_decision": dict(self.speaker_profiles.last_decision) if self.speaker_profiles else {},
+                "reference_bank": {"session": dict(self.reference_resolver.session) if self.reference_resolver else {},
+                                   "reason": self.reference_resolver.last_reason if self.reference_resolver else "none"},
                 "last_vad": self.last_vad,
                 "last_speaker": self.last_speaker,
                 "last_event": self.last_event,
@@ -723,6 +880,31 @@ def make_handler(monitor: LiveMonitor):
             elif parsed.path == "/api/robot-speaking":
                 monitor.set_robot_speaking(query.get("speaking", ["0"])[0] in {"1", "true", "True"})
                 self._send_json(monitor.state())
+            elif parsed.path == "/api/attention-target":
+                payload=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or "{}")
+                resolver=monitor.reference_resolver
+                speaker=str(payload.get("speaker_id") or "");person=payload.get("person_id")
+                reference=resolver.resolve(speaker, person) if resolver else None
+                if not reference:
+                    # No reference means no target-speaker ASR. Refusing is the
+                    # honest answer; conditioning on somebody else's voice would
+                    # produce a confident transcript of the wrong person.
+                    self._send_json({"accepted": False, "reason": resolver.last_reason if resolver else "no_resolver",
+                                     "speaker_id": speaker})
+                    return
+                target=monitor.attention_target.set(dict(payload, reference_id=reference), now_ms())
+                self._send_json({"accepted": True, "reference_used": reference, "target": target})
+            elif parsed.path == "/api/speaker-thresholds":
+                # Tunable while it runs: the bars that decide whether a voice is
+                # somebody. Nothing here is calibrated on real-person ROC data,
+                # so the field has to be able to move them and watch.
+                payload=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or "{}")
+                if monitor.speaker_profiles is None:
+                    self._send_json({"error":"no speaker model loaded"})
+                else:
+                    self._send_json({"thresholds":monitor.speaker_profiles.tune(**{
+                        key:payload.get(key) for key in ("threshold","raw_floor","z_floor","margin_floor")
+                        if payload.get(key) is not None})})
             elif parsed.path == "/api/voice-pool":
                 payload=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or "{}")
                 with monitor.lock:
@@ -734,7 +916,12 @@ def make_handler(monitor: LiveMonitor):
                             {"overlap":float(sample.get("overlap_probability") or 0),"echo":float(sample.get("self_echo_probability") or 0),"duration_ms":int(sample.get("ended_ms") or 0)-int(sample.get("started_ms") or 0)})
                     if accepted and not monitor.speaker_profiles.profiles[str(payload.get("person_id"))].get("reference_path") and getattr(monitor,"_last_utterance_key",None)==(sample.get("started_ms"),sample.get("ended_ms")):
                         monitor.save_tse_reference(str(payload["person_id"]))
-                    self._send_json({"accepted":accepted})
+                    # This voice was auto-registered as a stranger and the face
+                    # has now said who it is: the cluster belongs in that
+                    # person's pool instead of competing with it.
+                    cluster=str(payload.get("cluster_id") or "")
+                    merged=bool(cluster and accepted and monitor.speaker_profiles.merge_cluster(cluster,str(payload.get("person_id"))))
+                    self._send_json({"accepted":accepted,"cluster_merged":merged})
             elif parsed.path == "/api/enroll-speaker":
                 payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8") or "{}")
                 speaker_id = str(payload.get("speaker_id") or "").strip()
@@ -809,6 +996,49 @@ def coerce_device(value: str):
         return int(value)
     except ValueError:
         return value
+
+
+def refresh_audio_devices() -> bool:
+    """Ask CoreAudio again instead of trusting PortAudio's cached list.
+
+    PortAudio enumerates devices once, at initialisation. An array unplugged
+    after that still appears in query_devices() while opening it fails with
+    -9986 (paInternalError) — which reads like a driver bug and is in fact an
+    empty USB port. Re-initialising is the only way to see what is there now.
+    """
+    try:
+        import sounddevice as sd
+        sd._terminate()
+        sd._initialize()
+        return True
+    except Exception:
+        return False
+
+
+def input_device_channels(device_arg) -> int | None:
+    """Input channels the device has right now, or None if it is not there."""
+    try:
+        import sounddevice as sd
+        return int(sd.query_devices(device_arg, "input")["max_input_channels"])
+    except Exception:
+        return None
+
+
+def open_failure_message(exc: Exception, device_arg, required_channels: int) -> str:
+    """Say whether the port is empty or the device refused to open."""
+    refresh_audio_devices()
+    channels = input_device_channels(device_arg)
+    label = "默认输入" if device_arg is None else f"“{device_arg}”"
+    if channels is None:
+        return (f"{label} 已经不在系统里了：设备在启动时还能枚举，打开采集流时已经消失，"
+                f"通常是 USB 掉线（换根线、直插机器、不要串接总线供电的 HUB）。"
+                f"原始错误：{exc}；当前可见输入设备：{available_inputs()}。"
+                f"采集请求已保留，设备回来后会自动恢复。")
+    if channels < int(required_channels):
+        return (f"{label} 现在只有 {channels} 个输入通道，所选配置需要 {int(required_channels)} 个："
+                f"设备可能以另一种模式重新枚举了。原始错误：{exc}")
+    return (f"{label} 在系统里（{channels} 通道）但采集流打不开：可能被别的程序占用，或采样率/通道数不被接受。"
+            f"原始错误：{exc}。采集请求已保留，会自动重试。")
 
 
 def available_inputs() -> str:

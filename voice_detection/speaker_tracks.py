@@ -27,8 +27,16 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-WINDOW_MS = 600          # embedded at once; shorter than this and the embedding is noise
-HOP_MS = 300             # how often a window is taken
+# Measured on this machine with the enrolled owner's own registration audio
+# (ERes2NetV2, 2.74 s): scored against his own pool, 0.6 s windows came out
+# between 0.108 and 0.708, 1.0 s windows 0.728-0.822, and 1.5 s and up
+# 0.749-0.897. Below about a second the embedding says more about which
+# syllable was in the window than about who said it — which is how one field
+# session minted five hundred "new speakers" out of two people.
+WINDOW_MS = 1500         # embedded at once
+HOP_MS = 500             # how often a window is taken
+MIN_EMBED_MS = 1200      # refuse to embed less speech than this
+MIN_SPEECH_FOR_REFERENCE_MS = 2000   # a cluster has to survive before it earns a file
 ACTIVE_MS = 3000         # a speaker stays "in the conversation" this long after speaking
 FORGET_MS = 120000       # and is dropped from the session entirely after this
 NEW_CLUSTER_BELOW = .55  # below this similarity to every known cluster, it is somebody new
@@ -47,9 +55,29 @@ class SpeakerTrack:
     identity_confidence: float
     samples: int
     embedding: np.ndarray = field(repr=False, default=None)
+    reference_path: str | None = None
+    reference_quality: float = 0.0
+    display_name: str | None = None
+
+    def digest(self, buckets=24):
+        """A small, stable summary of the voiceprint for the console.
+
+        192 numbers do not fit on a screen and mean nothing to a reader; the
+        point of showing them is to see at a glance that two rows are different
+        voices. Mean-pooled into two dozen buckets they still look different
+        when they are different, and identical when it is one person.
+        """
+        vector = _unit(self.embedding)
+        if vector is None:
+            return []
+        groups = np.array_split(vector, min(buckets, vector.size))
+        return [round(float(part.mean()), 3) for part in groups]
 
     def to_json_dict(self, stamp_ms=None):
         return {"speaker_id": self.speaker_id, "person_id": self.person_id,
+                "display_name": self.display_name or self.person_id or self.speaker_id,
+                "embedding_digest": self.digest(),
+                "reference_available": bool(self.reference_path),
                 "first_heard_ms": self.first_heard_ms, "last_heard_ms": self.last_heard_ms,
                 "speech_ms": self.speech_ms, "azimuth_deg": self.azimuth_deg,
                 "identity_confidence": round(float(self.identity_confidence), 3),
@@ -129,7 +157,7 @@ class SpeakerTracker:
         """Embed one window and fold it into the speaker set. Returns the track."""
         self.last_window_ms = int(stamp_ms)
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
-        if samples.size < 16000 * self.window_ms // 2000:
+        if samples.size < 16 * max(MIN_EMBED_MS, self.window_ms // 2):
             self.last_reason = "window_too_short"
             return None
         if echo_probability >= .3:
@@ -182,12 +210,14 @@ class SpeakerTracker:
                 self.last_reason = "joined_uncertain"
             else:
                 key = named or f"spk_{self.next_id:02d}"
+                ordinal = self.next_id
                 if named is None:
                     self.next_id += 1
                 track = self.tracks.get(key) or SpeakerTrack(
                     speaker_id=key, person_id=named, first_heard_ms=stamp_ms, last_heard_ms=stamp_ms,
                     speech_ms=0, azimuth_deg=azimuth_deg, identity_confidence=float(similarity or 0),
-                    samples=0, embedding=vector.copy())
+                    samples=0, embedding=vector.copy(),
+                    display_name=self._name_for(named) or f"声音{ordinal}")
                 self.tracks[key] = track
                 self.last_reason = "new_speaker"
                 if len(self.tracks) > MAX_CLUSTERS:
@@ -206,9 +236,21 @@ class SpeakerTracker:
                 # never renames itself from its own drifting average.
                 track.person_id = named
                 track.identity_confidence = float(similarity or 0)
+                track.display_name = self._name_for(named) or track.display_name
             elif named and track.person_id == named:
                 track.identity_confidence = max(track.identity_confidence, float(similarity or 0))
+                track.display_name = self._name_for(named) or track.display_name
             return track
+
+    def _name_for(self, identity):
+        """The registered person's own name, or the ordinal they were given."""
+        if not identity:
+            return None
+        resolve = getattr(self.profiles, "display_name", None)
+        try:
+            return str(resolve(identity)) if callable(resolve) else str(identity)
+        except Exception:
+            return str(identity)
 
     def _forget(self, stamp_ms):
         for key in [key for key, track in self.tracks.items() if stamp_ms - track.last_heard_ms > FORGET_MS]:
@@ -226,3 +268,130 @@ class SpeakerTracker:
                 "active": [track.speaker_id for track in self.active(stamp_ms)],
                 "reason": self.last_reason, "embed_ms": round(self.embed_ms, 1),
                 "window_ms": self.window_ms, "hop_ms": self.hop_ms}
+
+
+class SpeakerReferenceResolver:
+    """Which recording to hand a target-speaker recogniser for this person.
+
+    Two places to look. An enrolled identity already has a reference saved from
+    registration, kept in the speaker profile store. Anybody else — a visitor
+    the room has only just met — has nothing, and asking somebody to enrol
+    before the robot can follow them in a crowd is not how any of this should
+    work, so a clean window of their own speech is captured as they talk.
+
+    No reference means no target-speaker ASR. Handing the model somebody else's
+    voice, or a two-second scrap of overlapping noise, produces a confident
+    transcript of the wrong person.
+    """
+
+    MIN_SECONDS = 2.0
+    MAX_SECONDS = 6.0
+
+    def __init__(self, profiles, folder, ring=None):
+        from pathlib import Path
+        self.profiles = profiles
+        self.folder = Path(folder)
+        self.ring = ring
+        self.session = {}
+        self.last_reason = "no_request_yet"
+
+    def enrolled_reference(self, person_id):
+        from pathlib import Path
+        profile = (self.profiles.profiles.get(str(person_id)) if self.profiles else None) or {}
+        path = profile.get("reference_path")
+        return str(path) if path and Path(path).is_file() else None
+
+    def resolve(self, speaker_id, person_id=None):
+        """The best reference for this speaker, or None with a reason recorded."""
+        for candidate in (person_id, speaker_id):
+            if not candidate:
+                continue
+            path = self.enrolled_reference(candidate)
+            if path:
+                self.last_reason = "enrolled_reference"
+                return path
+        path = self.session.get(str(speaker_id))
+        if path:
+            self.last_reason = "session_reference"
+            return path
+        self.last_reason = "no_reference_yet"
+        return None
+
+    def capture(self, track, quality, write_wav=None):
+        """Keep a clean window of this speaker as their session reference.
+
+        Only from audio good enough to be worth conditioning a model on: no
+        overlap, no playback of our own, and long enough to carry a voice.
+        """
+        import wave
+        from pathlib import Path
+        if self.ring is None or track is None:
+            return None
+        if quality.get("overlap", 1) > .2 or quality.get("echo", 1) > .2:
+            self.last_reason = "window_not_clean"
+            return None
+        if int(track.speech_ms or 0) < MIN_SPEECH_FOR_REFERENCE_MS:
+            # One window is not a speaker. Writing a file for every cluster the
+            # moment it appeared left five hundred six-second wavs on disk from
+            # a session with two people in the room.
+            self.last_reason = "cluster_too_new"
+            return None
+        existing = self.session.get(track.speaker_id)
+        score = float(1.0 - quality.get("overlap", 0)) * float(track.identity_confidence or .5)
+        if existing and score <= track.reference_quality:
+            return existing
+        audio, _ = self.ring.window(int(self.MAX_SECONDS * 1000))
+        if audio.size < int(self.MIN_SECONDS * 16000):
+            self.last_reason = "not_enough_audio"
+            return None
+        self.folder.mkdir(parents=True, exist_ok=True)
+        path = self.folder / f"session_{track.speaker_id}.wav"
+        if write_wav is None:
+            with wave.open(str(path), "wb") as handle:
+                handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(16000)
+                handle.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+        else:
+            write_wav(path, audio, 16000)
+        self.session[track.speaker_id] = str(path)
+        track.reference_path = str(path)
+        track.reference_quality = score
+        self.last_reason = "captured_session_reference"
+        return str(path)
+
+
+class AuditoryAttentionTarget:
+    """Who attention has decided to listen to, and until when.
+
+    Held here rather than inferred, because the decision belongs upstream: the
+    ear does not choose whose voice matters. An expired target is not a target —
+    focused hearing falls back to whoever is loudest rather than carrying on with
+    somebody who left.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.target = None
+
+    def set(self, payload, stamp_ms):
+        with self.lock:
+            self.target = {
+                "speaker_id": str(payload.get("speaker_id") or ""),
+                "person_id": str(payload.get("person_id") or "") or None,
+                "reference_id": payload.get("reference_id"),
+                "direction_deg": payload.get("direction_deg"),
+                "strength": float(payload.get("strength") or 1.0),
+                "ttl_ms": int(payload.get("ttl_ms") or 4000),
+                "pre_roll_ms": int(payload.get("pre_roll_ms") or 2000),
+                "reason": str(payload.get("reason") or ""),
+                "issued_ms": int(stamp_ms),
+            }
+            return dict(self.target)
+
+    def current(self, stamp_ms):
+        with self.lock:
+            target = self.target
+            if not target:
+                return None
+            if int(stamp_ms) - target["issued_ms"] > target["ttl_ms"]:
+                return None
+            return dict(target, age_ms=int(stamp_ms) - target["issued_ms"])

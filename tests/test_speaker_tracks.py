@@ -19,7 +19,10 @@ class FakeEmbedder:
         return self.table.get(key)
 
 
-def speech(key, seconds=0.6, rate=16000):
+def speech(key, seconds=1.5, rate=16000):
+    """A window long enough to embed: measured on the owner's own enrolment,
+    0.6 s windows scored anywhere from 0.108 to 0.708 against his own pool, so
+    the tracker now refuses anything under 1.2 s."""
     audio = (np.random.default_rng(key).normal(0, .05, int(rate * seconds))).astype(np.float32)
     audio[0] = key / 1000.0
     return audio
