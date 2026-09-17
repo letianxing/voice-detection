@@ -127,6 +127,67 @@ INDEX_HTML = """<!doctype html>
 """
 
 
+VISION_STATE_URL = os.environ.get("VOICE_VISION_STATE_URL", "http://127.0.0.1:8080/api/state")
+VISUAL_BIND_DEG = float(os.environ.get("VOICE_VISUAL_BIND_DEG", "15"))          # pending calibration
+VISUAL_AZIMUTH_SIGN = float(os.environ.get("VOICE_VISUAL_AZIMUTH_SIGN", "1"))  # -1 if camera and array bearings are mirrored
+VISUAL_AZIMUTH_OFFSET_DEG = float(os.environ.get("VOICE_VISUAL_AZIMUTH_OFFSET_DEG", "0"))
+
+
+def fetch_vision_people(url=None, timeout_s=0.2):
+    """People visible to vision-detection right now, or [] when it is not running.
+
+    Called once per finished utterance from the finalizer thread, never from the audio
+    callback. Vision being down is normal (voice runs alone in tests); it only means
+    no body evidence for this utterance.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url or VISION_STATE_URL, timeout=timeout_s) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception:
+        return []
+    people = (payload.get("state") or payload).get("people") or []
+    return [p for p in people if isinstance(p, dict) and p.get("person_id")]
+
+
+def bind_utterance_to_visible_person(direction, people):
+    """Which visible person this utterance came from, for the stranger-profile guard only.
+
+    Returns {"internal_id": person_id or "", "visible_ids": [...], "reason": ...}. This
+    does not decide who is being spoken to or overwrite anyone's face: it records which
+    body the sound lined up with so that one voice profile cannot keep absorbing
+    utterances from two people the camera saw together.
+
+    Rules, in order: sound bearing within VISUAL_BIND_DEG of exactly one person; if
+    several, the one whose lips were moving (if exactly one); no bearing, exactly one
+    person in view with valid moving lips; otherwise unbound.
+    """
+    visible = [str(p.get("person_id")) for p in people]
+    result = {"internal_id": "", "visible_ids": visible, "reason": "unbound"}
+    if not people:
+        result["reason"] = "nobody_visible"
+        return result
+    moving = [p for p in people if p.get("lip_motion_valid") and p.get("lip_motion")]
+    if direction.get("direction_valid") and direction.get("direction_deg") is not None:
+        bearing = VISUAL_AZIMUTH_SIGN * float(direction["direction_deg"]) + VISUAL_AZIMUTH_OFFSET_DEG
+        near = [p for p in people if p.get("has_azimuth", True) and p.get("azimuth_deg") is not None
+                and abs(float(p["azimuth_deg"]) - bearing) <= VISUAL_BIND_DEG]
+        if len(near) == 1:
+            return dict(result, internal_id=str(near[0]["person_id"]), reason="bearing")
+        if len(near) > 1:
+            near_moving = [p for p in near if p in moving]
+            if len(near_moving) == 1:
+                return dict(result, internal_id=str(near_moving[0]["person_id"]), reason="bearing_and_lips")
+            result["reason"] = "several_at_bearing"
+            return result
+        result["reason"] = "nobody_at_bearing"
+        return result
+    if len(people) == 1 and moving:
+        return dict(result, internal_id=str(people[0]["person_id"]), reason="only_person_lips")
+    result["reason"] = "no_bearing"
+    return result
+
+
 class LiveMonitor:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -400,6 +461,8 @@ class LiveMonitor:
         self._last_utterance_key = (utterance.started_ms, utterance.ended_ms)
         self._last_utterance_audio = utterance.samples.copy()
         self._last_utterance_rate = utterance.sample_rate_hz
+        context["visual"] = bind_utterance_to_visible_person(
+            context.get("direction") or {}, fetch_vision_people())
         streamed_final = None
         if stream is not None:
             try:
@@ -556,7 +619,10 @@ class LiveMonitor:
             if (not echo_match and data.get("speaker_vector") and self.speaker_profiles
                     and float(data.get("self_echo_probability") or 0)<.4 and float(data.get("overlap_probability") or 0)<.25
                     and transcript.ended_ms-transcript.started_ms>=1500 and str(data.get("text") or "").strip()):
-                identity, role, similarity=self.speaker_profiles.remember_stranger(data["speaker_vector"])
+                visual = data.get("visual") or {}
+                identity, role, similarity=self.speaker_profiles.remember_stranger(
+                    data["speaker_vector"], duration_ms=transcript.ended_ms-transcript.started_ms, now_ms=transcript.ended_ms,
+                    internal_id=visual.get("internal_id", ""), visible_ids=visual.get("visible_ids") or [])
                 speaker.update(speaker_id=identity,speaker_role=role,similarity=similarity)
                 self.last_speaker=dict(speaker,embedding=data["speaker_vector"],finalized_identity=True)
             from .echo_guard import normalized
