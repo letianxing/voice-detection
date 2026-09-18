@@ -7,6 +7,7 @@ stable while allowing a model backend to be added without changing ROS4HRI.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import sys
 import time
@@ -97,6 +98,36 @@ class AutoTargetSpeakerExtractor(PassthroughTargetSpeakerExtractor):
     @property
     def backend(self) -> str:
         return "auto-baseline"
+
+
+def cocktail_backends() -> list[dict]:
+    """Which ways of working out "who said what in a crowd" are installed.
+
+    The console switches between them, so it has to be told what is actually
+    there rather than discovering it as silence: a backend whose weights are
+    still downloading falls back to passthrough, which sounds like the switch
+    did nothing.
+    """
+    root = Path(__file__).resolve().parents[1]
+    speakerbeam = root / "weights/real-tse/pretrained/spk_emb_causal_100/avg_model.bin"
+    speakerbeam_pt = root / "weights/real-tse/pretrained/spk_emb_causal_100/avg_model.pt"
+    xiaomi = Path(os.environ.get("VOICE_COCKTAIL_ASR_DIR", str(root / "weights/xiaomi-cocktailasr")))
+    have_speakerbeam = speakerbeam.is_file() or speakerbeam_pt.is_file()
+    weight = xiaomi / "pytorch_model.bin"
+    have_xiaomi = weight.is_file() and weight.stat().st_size > 30_000_000_000
+    return [
+        {"id": "baseline", "label": "基线：阵列波束 + 方向", "available": True,
+         "reason": "always available: array beamforming and GCC-PHAT direction"},
+        {"id": "speakerbeam", "label": "SpeakerBeam 目标提取", "available": have_speakerbeam,
+         "reason": "" if have_speakerbeam else f"缺少 {speakerbeam_pt}"},
+        {"id": "auto", "label": "自动：重叠时切目标提取", "available": have_speakerbeam,
+         "reason": "" if have_speakerbeam else f"缺少 {speakerbeam_pt}"},
+        {"id": "multi", "label": "多人分段分离（需参考音）", "available": have_speakerbeam,
+         "reason": "" if have_speakerbeam else f"缺少 {speakerbeam_pt}"},
+        {"id": "cocktail", "label": "Xiaomi CocktailASR", "available": have_xiaomi,
+         "reason": "" if have_xiaomi else f"权重未就绪：{weight}"
+                   + (f"（当前 {weight.stat().st_size/1e9:.1f} GB / 需要约 35.6 GB）" if weight.is_file() else "（未下载）")},
+    ]
 
 
 def create_target_speaker_extractor(name: str = "baseline") -> TargetSpeakerExtractor:

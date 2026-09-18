@@ -27,7 +27,7 @@ from .ros4hri import acoustic_track_to_ros4hri_json
 from .types import AudioFrame
 from .streaming_asr import AsrWorker, UtteranceSegmenter
 from .utterance_finalizer import UtteranceFinalizer
-from .target_speaker import create_target_speaker_extractor
+from .target_speaker import cocktail_backends, create_target_speaker_extractor
 from .speaker_embedding import SpeakerEmbedder, SpeakerProfileStore
 from .speaker_tracks import (AuditoryAttentionTarget, MixedAudioRing, SpeakerReferenceResolver,
                              SpeakerTracker)
@@ -765,6 +765,7 @@ class LiveMonitor:
                 "finalizer_dropped": self._finalizer.dropped if self._finalizer else 0,
                 "tse_backend": getattr(self.target_speaker_extractor, "backend", "baseline"),
                 "tse_mode": self.tse_mode,
+                "cocktail_backends": cocktail_backends(),
                 "last_tse": self.last_tse,
                 "robot_speaking": self.playback.speaking or self.robot_speaking,
                 "input_device_info": self.input_device_info,
@@ -910,6 +911,31 @@ def make_handler(monitor: LiveMonitor):
                     return
                 target=monitor.attention_target.set(dict(payload, reference_id=reference), now_ms())
                 self._send_json({"accepted": True, "reference_used": reference, "target": target})
+            elif parsed.path == "/api/cocktail-mode":
+                # Switch how "who said what in a crowd" is computed, without
+                # losing the capture session: same device, same profile, new
+                # extractor. An unavailable backend is refused rather than
+                # silently degraded to passthrough.
+                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or "{}")
+                mode = str(payload.get("mode") or "baseline")
+                backends = {item["id"]: item for item in cocktail_backends()}
+                if mode not in backends:
+                    self._send_json({"error": f"unknown cocktail mode {mode}", "modes": list(backends)})
+                elif not backends[mode]["available"]:
+                    self._send_json({"mode": mode, "available": False, "reason": backends[mode]["reason"],
+                                     "tse_mode": monitor.tse_mode})
+                else:
+                    # Swapped in place, not by restarting capture: the frame
+                    # path reads the extractor object each block, and a restart
+                    # reloads every model and takes the microphone down with it
+                    # — measured, it left capture off and the service busy for
+                    # twenty seconds.
+                    monitor.tse_mode = mode
+                    monitor.target_speaker_extractor = create_target_speaker_extractor(mode)
+                    monitor.multi_transcriber = None
+                    self._send_json({"mode": mode, "available": True, "tse_mode": monitor.tse_mode,
+                                     "backend": getattr(monitor.target_speaker_extractor, "backend", ""),
+                                     "running": monitor.running, "error": monitor.error})
             elif parsed.path == "/api/reload-profiles":
                 # A script enrolled something into the file while the service
                 # was running — the robot's own voice, for instance. Without
