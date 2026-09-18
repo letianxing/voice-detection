@@ -132,6 +132,23 @@ INDEX_HTML = """<!doctype html>
 """
 
 
+# How many of the newest finished sentences keep their 192-dim speaker vector
+# in the compact payload. Only the recent ones are ever compared against the
+# voices of this conversation; older ones are history and cost 2.5 kB each.
+VECTORS_IN_COMPACT = 4
+
+
+def _compact_transcripts(transcripts) -> list[dict]:
+    rows, keep = [], len(transcripts) - VECTORS_IN_COMPACT
+    for index, item in enumerate(transcripts):
+        row = {key: value for key, value in item.items() if key != "speaker_vector"}
+        vector = item.get("speaker_vector")
+        if vector and index >= keep:
+            row["speaker_vector"] = [round(float(value), 4) for value in vector]
+        rows.append(row)
+    return rows
+
+
 class LiveMonitor:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -235,8 +252,13 @@ class LiveMonitor:
             if running:
                 self._repair_dead_channels(wanted)
                 continue
-            refresh_audio_devices()
             self.retry_count += 1
+            if not device_is_present(wanted["device"]):
+                with self.lock:
+                    self.error = (f"等待输入设备回来：{wanted['device']} 现在不在系统里"
+                                  f"（已重试 {self.retry_count} 次，插上后自动恢复）")
+                continue
+            self._reload_devices()
             self._start_once(wanted["profile"], wanted["device"], wanted["seconds"], wanted["tse"])
 
     # An array stream opened at the wrong moment — right after the device
@@ -247,6 +269,25 @@ class LiveMonitor:
     # the service now does that instead of the person at the keyboard.
     DEAD_CHANNEL_STRIKES = 2
     REOPEN_INTERVAL_MS = 60000
+
+    def _reload_devices(self) -> None:
+        """Refresh the device list without wedging the audio library.
+
+        Terminating PortAudio while a stream is open leaves it in a state where
+        it can neither play nor see devices: the playback output went silent and
+        stayed "warm", and the capture retry reported the array missing 118
+        times in a row while a fresh process listed it. So playback is closed
+        first and warmed again afterwards.
+        """
+        try:
+            self.playback.close()
+        except Exception:
+            pass
+        refresh_audio_devices()
+        try:
+            self.playback.warmup()
+        except Exception as exc:
+            self.playback.error = str(exc)[:200]
 
     def _repair_dead_channels(self, wanted) -> None:
         if self.scene is None or not getattr(self.scene.profile, "supports_raw_multichannel", False):
@@ -271,7 +312,7 @@ class LiveMonitor:
         self._last_reopen_ms = now_ms()
         self.reopen_count += 1
         self._teardown()
-        refresh_audio_devices()
+        self._reload_devices()
         self._start_once(wanted["profile"], wanted["device"], wanted["seconds"], wanted["tse"])
         with self.lock:
             self.capture_warning = (f"阵列只有 1 个通道有信号，已第 {self.reopen_count} 次重开采集流恢复多通道；"
@@ -747,7 +788,13 @@ class LiveMonitor:
                 "last_event": self.last_event,
                 "last_transcript": self.last_transcript,
                 "active_utterance": self._segmenter.snapshot() if self._segmenter else None,
-                "transcripts": [{key: value for key, value in item.items() if key != "speaker_vector"} for item in self.transcripts] if compact else list(self.transcripts),
+                # Compact used to drop every speaker vector, which is what the
+                # attention service polls — so it could tell *that* a voice was
+                # unrecognised but had nothing to compare it against, and every
+                # unrecognised sentence fell back to "whoever spoke last". The
+                # newest few keep their vector, rounded: that is what deciding
+                # "which of the people here is this" costs, and it is small.
+                "transcripts": _compact_transcripts(self.transcripts) if compact else list(self.transcripts),
                 "playback": self.playback.state(),
                 "last_streaming_transcript": self.last_streaming_transcript,
                 "asr_enabled": bool(
@@ -1079,13 +1126,41 @@ def coerce_device(value: str):
         return value
 
 
-def refresh_audio_devices() -> bool:
-    """Ask CoreAudio again instead of trusting PortAudio's cached list.
+def device_is_present(name: str) -> bool:
+    """Ask a fresh process whether the system can see this input device.
 
-    PortAudio enumerates devices once, at initialisation. An array unplugged
-    after that still appears in query_devices() while opening it fails with
-    -9986 (paInternalError) — which reads like a driver bug and is in fact an
-    empty USB port. Re-initialising is the only way to see what is there now.
+    PortAudio enumerates devices once, at initialisation, and re-initialising a
+    long-running process turns out to be a bad way to refresh that: it
+    invalidates every open stream (which silently killed playback) and, worse,
+    can leave the library unable to see any device at all. Measured in the
+    field: the array came back on the bus, a fresh process listed it as
+    MicArray with eight channels, and the service reported "No input device
+    matching \'MicArray\'" for 118 consecutive retries.
+
+    A subprocess costs about 200 ms and always tells the truth, because its
+    PortAudio was initialised just now.
+    """
+    wanted = str(name or "").strip()
+    if not wanted or wanted == "default":
+        return True
+    import subprocess
+    import sys
+    code = ("import sounddevice as sd;"
+            "print('\\n'.join(d['name'] for d in sd.query_devices() if d['max_input_channels']>0))")
+    try:
+        listing = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=15)
+    except Exception:
+        return False
+    return any(wanted in line for line in listing.stdout.splitlines())
+
+
+def refresh_audio_devices() -> bool:
+    """Re-read the device list in this process. Costly and not always reliable.
+
+    Kept for the paths that have nothing else — opening a stream resolves a
+    device *name* against the cached list, so a stale list has to be refreshed
+    somehow. Every caller must close its streams first: terminating PortAudio
+    with streams open is what wedged it in the field.
     """
     try:
         import sounddevice as sd
@@ -1106,9 +1181,16 @@ def input_device_channels(device_arg) -> int | None:
 
 
 def open_failure_message(exc: Exception, device_arg, required_channels: int) -> str:
-    """Say whether the port is empty or the device refused to open."""
-    refresh_audio_devices()
+    """Say whether the port is empty or the device refused to open.
+
+    Asks a fresh process rather than re-initialising this one: the answer is
+    for a human to read, and re-initialising has its own cost.
+    """
+    present = device_is_present(device_arg if isinstance(device_arg, str) else "")
     channels = input_device_channels(device_arg)
+    if channels is None and present:
+        return (f"“{device_arg}” 在系统里，但本服务的音频子系统还看不到它（PortAudio 的设备表是启动时读的）。"
+                f"采集请求已保留，正在重试；原始错误：{exc}")
     label = "默认输入" if device_arg is None else f"“{device_arg}”"
     if channels is None:
         return (f"{label} 已经不在系统里了：设备在启动时还能枚举，打开采集流时已经消失，"
