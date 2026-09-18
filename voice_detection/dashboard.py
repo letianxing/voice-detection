@@ -20,6 +20,7 @@ from .frontend import CocktailFrontend, now_ms
 from .asr import (ExternalCommandAsrAdapter, NullAsrAdapter, SherpaSenseVoiceAsrAdapter,
                   SherpaZipformerAsrAdapter, VoskAsrAdapter, offline_pass_is_corroborated,
                   resample_mono, write_wav)
+from .echo_guard import ECHO_RESIDUAL, own_voice
 from .io import list_sounddevice_devices
 from .profiles import get_profile, load_profiles
 from .ros4hri import acoustic_track_to_ros4hri_json
@@ -209,8 +210,12 @@ class LiveMonitor:
             self.desired = {"profile": str(profile_id), "device": str(device),
                             "seconds": float(seconds or 0), "tse": str(tse_mode or "baseline")}
         self._start_once(profile_id, device, seconds, tse_mode)
-        if not self.running:
-            self._ensure_supervisor()
+        # Always, not only when the first attempt failed: the supervisor is
+        # also what notices that an array opened in the state where only
+        # channel 0 carries signal. Started only on failure, it never ran in
+        # the session where capture came up fine and the array was mute on
+        # seven channels for the whole test.
+        self._ensure_supervisor()
 
     def _ensure_supervisor(self) -> None:
         if self._supervisor is not None and self._supervisor.is_alive():
@@ -776,12 +781,22 @@ class LiveMonitor:
             speaker = context.pop("speaker", {})
             data["speaker_vector"] = speaker.pop("embedding", [])
             data.update(context)
+            residual = float(data.get("self_echo_probability") or 0)
             echo_match = self.playback.echo_match(data.get("text", ""), int(data.get("started_ms") or 0), int(data.get("ended_ms") or now_ms()), float(speaker.get("similarity") or 0),
-                                                  float(data.get("self_echo_probability") or 0))
+                                                  residual)
+            # Three independent ways of saying "that was us": the words we
+            # played, the cancellation residual, and our own voiceprint.
+            echo_match = own_voice(echo_match, residual, speaker.get("speaker_role"))
             data["source"] = "robot_echo" if echo_match else "microphone"
             data["echo_match"] = echo_match
             if echo_match:
                 speaker = dict(speaker, speaker_id="robot", speaker_role="robot")
+                if (echo_match.get("reason") == "matches_contemporaneous_robot_playback"
+                        and data.get("speaker_vector") and self.speaker_profiles):
+                    # The text match is the one path that is certain, so it is
+                    # the one allowed to teach the robot what it sounds like
+                    # through the microphone rather than through the file.
+                    self.speaker_profiles.learn_own_voice(data["speaker_vector"])
             if (not echo_match and data.get("speaker_vector") and self.speaker_profiles
                     and float(data.get("self_echo_probability") or 0)<.4 and float(data.get("overlap_probability") or 0)<.25
                     and transcript.ended_ms-transcript.started_ms>=1500 and str(data.get("text") or "").strip()):
@@ -895,6 +910,15 @@ def make_handler(monitor: LiveMonitor):
                     return
                 target=monitor.attention_target.set(dict(payload, reference_id=reference), now_ms())
                 self._send_json({"accepted": True, "reference_used": reference, "target": target})
+            elif parsed.path == "/api/reload-profiles":
+                # A script enrolled something into the file while the service
+                # was running — the robot's own voice, for instance. Without
+                # this the running copy never sees it.
+                if monitor.speaker_profiles is None:
+                    self._send_json({"error": "no speaker model loaded"})
+                else:
+                    monitor.speaker_profiles.load()
+                    self._send_json({"identities": sorted(monitor.speaker_profiles.profiles)})
             elif parsed.path == "/api/speaker-thresholds":
                 # Tunable while it runs: the bars that decide whether a voice is
                 # somebody. Nothing here is calibrated on real-person ROC data,

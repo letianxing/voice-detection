@@ -103,6 +103,9 @@ class SpeakerProfileStore:
         # Face-verified samples waiting for a second opinion. In memory only:
         # a sample nothing has corroborated yet does not belong on disk.
         self.pending: dict[str, list] = {}
+        # Identities this copy removed. Without it, merging somebody else's
+        # writes back in on save resurrects everything the pruner just dropped.
+        self.forgotten: set[str] = set()
         self.load()
 
     def tune(self, **values) -> dict[str, float]:
@@ -123,6 +126,7 @@ class SpeakerProfileStore:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock:
+            self._merge_from_disk()
             fd,name=tempfile.mkstemp(prefix='.voices-',dir=self.path.parent)
             try:
                 with os.fdopen(fd,'w') as output:json.dump(self.profiles,output,ensure_ascii=False,indent=2)
@@ -136,10 +140,69 @@ class SpeakerProfileStore:
     # the next match harder.
     MAX_STRANGERS = 12
 
+    # A voice this close to the robot's own is the robot, and must never become
+    # a person. In the field the cluster stranger_a4b2ab9a794d was built out of
+    # the robot's playback over two sessions, then matched its own echo at
+    # 0.494 and put it in memory as somebody's sentence. Measured against the
+    # enrolled synthesiser voice, that cluster scored 0.458 to 0.514.
+    ROBOT_VOICE_FLOOR = .4
+
+    def sounds_like_the_robot(self, embedding):
+        return any(row["role"] == "robot" and row["score"] >= self.ROBOT_VOICE_FLOOR
+                   for row in self.rank(embedding))
+
+    def learn_own_voice(self, embedding):
+        """Add an utterance we know was ours to the robot's own pool.
+
+        Enrolment is synthesised audio, so it scores 0.78-0.84 against other
+        synthesised lines but only about 0.5 against the same voice after it
+        has been through the speaker, the room and echo cancellation. The
+        recordings that the text match identified beyond doubt are exactly the
+        samples that close that gap, and they cost nothing to collect.
+        """
+        vector=self._unit(embedding)
+        with self.lock:
+            profile=self.profiles.get('robot')
+            if vector is None or not profile or profile.get('role')!='robot':
+                return False
+            anchor=self._unit(profile.get('embedding') or [])
+            if anchor is None or anchor.shape!=vector.shape or float(np.dot(vector,anchor))<.3:
+                return False
+            try:
+                self._enroll('robot',vector.tolist(),'robot',profile.get('enrollment_text',''),anchor_floor=.3)
+            except ValueError:
+                return False
+            return True
+
+    def _merge_from_disk(self):
+        """Keep identities another process added while this one was running.
+
+        The whole file is rewritten on every save, so the last writer used to
+        win the whole store: enrolling the robot's own voice from a script
+        while the service was running put `robot` on disk, and the service's
+        next save — which happened to be a new stranger cluster — deleted it
+        again and brought back the cluster the script had just removed. An
+        identity this copy has never heard of is somebody else's write, and it
+        stays.
+        """
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        for identity, profile in payload.items():
+            if identity in self.forgotten:
+                continue      # this copy deleted it on purpose
+            if identity not in self.profiles and isinstance(profile, dict):
+                self.profiles[identity] = profile
+
     def remember_stranger(self, embedding):
         speaker_id, role, similarity = self.match(embedding)
         if speaker_id != "unknown":
             return speaker_id, role, similarity
+        if self.sounds_like_the_robot(embedding):
+            return "robot", "robot", next(row["score"] for row in self.rank(embedding) if row["role"] == "robot")
         ranked=self.rank(embedding)
         if ranked and ranked[0]["score"]>=self.thresholds["threshold"]:
             return "unknown","unknown",ranked[0]["score"]
@@ -149,12 +212,22 @@ class SpeakerProfileStore:
             self._prune_strangers()
         return speaker_id, "stranger", 1.0
 
+    def forget(self, identity):
+        """Remove an identity for good, so a later merge does not bring it back."""
+        with self.lock:
+            self.forgotten.add(str(identity))
+            existed = self.profiles.pop(str(identity), None) is not None
+            if existed:
+                self.save()
+            return existed
+
     def _prune_strangers(self):
         strangers=[(key,profile) for key,profile in self.profiles.items() if profile.get("role")=="stranger"]
         if len(strangers)<=self.MAX_STRANGERS:
             return
         strangers.sort(key=lambda item:(int(item[1].get("last_heard_ms") or 0),int(item[1].get("created_ms") or 0)))
         for key,_ in strangers[:len(strangers)-self.MAX_STRANGERS]:
+            self.forgotten.add(key)
             self.profiles.pop(key,None)
         self.save()
 
@@ -374,6 +447,8 @@ class SpeakerProfileStore:
         with self.lock:
             profile=self.profiles.get(identity)
             if not profile or profile.get('role') not in {'owner','known'}:return False
+            if self.sounds_like_the_robot(embedding):
+                return False   # the robot's own playback is not a sample of anybody
             ranked=self.rank(embedding)
             named=[row for row in ranked if row['role'] in {'owner','known'}]
             if named and named[0]['speaker_id']!=identity and named[0]['score']>=.6:

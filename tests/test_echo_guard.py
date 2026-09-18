@@ -64,3 +64,38 @@ class MisheardEchoTests(unittest.TestCase):
     def test_nor_is_a_person_saying_something_similar_when_nothing_played(self):
         self.assertIsNone(match_playback('我是小圆样。', 6000, 7000,
                                          self.reply('我是小圆呀', 1000, 2400), .49, .457))
+
+
+
+class OwnVoiceVerdictTests(unittest.TestCase):
+    """听成什么样都不重要，声学上就是自己的播放。
+
+    11:02 in the field: 「天行，我在这儿。」 came back as 「天晴我带着。」 — two
+    characters in common out of five, 0.40 similarity, below the corroborated
+    text bar of 0.55 — carrying 0.66 of our own playback, and it matched an
+    auto-created cluster at 0.494, so it was written to memory as somebody's
+    sentence. Three independent ways of recognising ourselves, because each one
+    of them has a case it misses.
+    """
+
+    def test_the_text_match_names_the_playback_it_came_from(self):
+        from voice_detection.echo_guard import own_voice
+        verdict = own_voice({'playback_id': 'p', 'turn_id': 't', 'score': .833,
+                             'reason': 'matches_contemporaneous_robot_playback'}, .62)
+        self.assertEqual(verdict['turn_id'], 't')
+
+    def test_a_mangled_echo_is_caught_by_the_residual_alone(self):
+        from voice_detection.echo_guard import own_voice
+        verdict = own_voice(None, .66)
+        self.assertEqual(verdict['reason'], 'echo_residual_without_a_text_match')
+        self.assertEqual(verdict['echo_residual'], .66)
+
+    def test_and_by_its_own_voiceprint_when_even_the_residual_is_low(self):
+        from voice_detection.echo_guard import own_voice
+        verdict = own_voice(None, .2, 'robot')
+        self.assertEqual(verdict['reason'], 'matches_the_robots_own_voiceprint')
+
+    def test_a_real_person_is_none_of_the_three(self):
+        from voice_detection.echo_guard import own_voice
+        self.assertIsNone(own_voice(None, 0., 'owner'))
+        self.assertIsNone(own_voice(None, .38, 'stranger'))

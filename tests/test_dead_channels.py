@@ -89,3 +89,32 @@ class ReopenSilentArrayTests(unittest.TestCase):
         for _ in range(8):
             monitor._repair_dead_channels(monitor.desired)
         self.assertEqual(monitor.reopen_count, 1)
+
+
+class SupervisorAlwaysRunsTests(unittest.TestCase):
+    """采集起来了也要有人看着阵列。
+
+    The repair was written and then never ran: the supervisor thread was only
+    started when the first attempt to open the device failed, so in the session
+    where capture came up normally and the array delivered channel 0 with seven
+    silent channels, nothing ever looked. The panel showed the warning for
+    fifteen minutes with capture_reopens at zero.
+    """
+
+    def test_a_successful_start_still_arms_the_supervisor(self):
+        from voice_detection.dashboard import LiveMonitor
+        import threading
+        monitor = LiveMonitor.__new__(LiveMonitor)
+        monitor.lock = threading.RLock()
+        monitor.running = True
+        monitor.desired = None
+        monitor._supervisor = None
+        armed = []
+        monitor._start_once = lambda *args: None
+        monitor.stop = lambda: None
+        monitor._ensure_supervisor = lambda: armed.append(True)
+
+        LiveMonitor.start(monitor, "sipeed_6_plus_1_usb_array", "MicArray", 0.)
+
+        self.assertEqual(armed, [True])
+        self.assertEqual(monitor.desired["device"], "MicArray")

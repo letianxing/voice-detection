@@ -222,3 +222,72 @@ class ConfidenceTests(unittest.TestCase):
             for _ in range(3):
                 store.add_verified_sample('天行', rng.normal(0, 1, 32).tolist(), '天行', .9, quality)
             self.assertEqual(store.profiles['天行']['anchor_groups'], 1)
+
+
+class OwnVoiceTests(unittest.TestCase):
+    """机器人得认得自己的声音，否则它会把自己记成陌生人。
+
+    From the field, 11:02: the robot said 「天行，我在这儿。」 and the microphone
+    brought it back as 「天晴我带着。」 — two characters in common out of five,
+    under every text bar — and it was filed under stranger_a4b2ab9a794d and
+    written to memory as somebody's sentence. Measured afterwards against a
+    voiceprint of the synthesiser, that cluster was the robot itself: 0.458 to
+    0.514 across five synthesised lines.
+
+    A voiceprint of its own voice does not depend on what the recogniser made
+    of the words. Measured on this machine, lines it never enrolled score 0.78
+    to 0.84 against the enrolled pool while the nearest other voice is 0.23,
+    and the owner's own enrolment stays at 0.897 to himself and is not flagged.
+    """
+
+    def store(self, tmp):
+        import numpy as np
+        store = SpeakerProfileStore(Path(tmp) / 'own.json')
+        base = np.eye(32)[0]
+        store.enroll('robot', base.tolist(), 'robot', anchor_floor=0.)
+        # Another synthesised line: same voice, not the same vector.
+        store.enroll('robot', (base * .9 + np.eye(32)[1] * .43).tolist(), 'robot', anchor_floor=.35)
+        store.enroll('天行', np.eye(32)[7].tolist(), 'owner')
+        return store, base
+
+    def test_its_own_voice_is_never_registered_as_a_person(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            store, base = self.store(tmp)
+            # Through the room: the same voice, further from the file.
+            heard = base * .5 + np.eye(32)[9] * .87
+            self.assertTrue(store.sounds_like_the_robot(heard.tolist()))
+            identity, role, _ = store.remember_stranger(heard.tolist())
+            self.assertEqual((identity, role), ('robot', 'robot'))
+            self.assertFalse([key for key, value in store.profiles.items()
+                              if value.get('role') == 'stranger'])
+
+    def test_a_person_is_not_mistaken_for_the_robot(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = self.store(tmp)
+            self.assertFalse(store.sounds_like_the_robot(np.eye(32)[7].tolist()))
+            self.assertEqual(store.match(np.eye(32)[7].tolist())[0], '天行')
+
+    def test_its_own_playback_never_joins_somebodys_pool(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            store, base = self.store(tmp)
+            quality = {'echo': 0., 'overlap': 0., 'duration_ms': 3000}
+            self.assertFalse(store.add_verified_sample('天行', base.tolist(), '天行', .9, quality))
+
+    def test_a_certain_echo_teaches_it_how_it_sounds_through_the_microphone(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            store, base = self.store(tmp)
+            before = len(store.profiles['robot']['embeddings'])
+            through_the_room = base * .55 + np.eye(32)[11] * .83
+            self.assertTrue(store.learn_own_voice(through_the_room.tolist()))
+            self.assertEqual(len(store.profiles['robot']['embeddings']), before + 1)
+            self.assertEqual(store.profiles['robot']['embedding'], base.tolist())
+
+    def test_but_an_unrelated_recording_does_not(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = self.store(tmp)
+            self.assertFalse(store.learn_own_voice(np.eye(32)[20].tolist()))

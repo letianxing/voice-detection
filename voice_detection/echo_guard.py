@@ -55,3 +55,27 @@ def match_playback(text, started_ms, ended_ms, records, speaker_similarity=0., s
                     'reason': 'matches_contemporaneous_robot_playback' if score >= .82
                               else 'echo_residual_over_our_own_playback'}
     return None
+
+
+def own_voice(match, residual, speaker_role=""):
+    """Which of the three independent ways says this was our own playback.
+
+    The text match names the playback it came from, so it is the precise one;
+    it is also the one that a badly misheard echo escapes. 11:02 in the field:
+    「天行，我在这儿。」 came back as 「天晴我带着。」 — 0.40 similarity, below
+    every text bar — carrying 0.66 of our own playback and matching an
+    auto-created cluster at 0.494, so it went into memory as somebody's
+    sentence. The residual and the robot's own voiceprint do not care what the
+    recogniser made of the words.
+    """
+    if match:
+        return dict(match)
+    if float(residual or 0) >= ECHO_RESIDUAL:
+        return {"playback_id": None, "turn_id": None, "score": None,
+                "echo_residual": round(float(residual or 0), 3),
+                "reason": "echo_residual_without_a_text_match"}
+    if str(speaker_role or "") == "robot":
+        return {"playback_id": None, "turn_id": None, "score": None,
+                "echo_residual": round(float(residual or 0), 3),
+                "reason": "matches_the_robots_own_voiceprint"}
+    return None
