@@ -32,6 +32,12 @@ class PlaybackEngine:
         self.fade_remaining=0
         self.stop_mode="none"
 
+    # A playback that has produced no audio for this long is not playing. The
+    # caller waits for `speaking` to clear before it says anything else, so a
+    # dead output stream silently ends the conversation rather than losing one
+    # sentence.
+    STALL_MS = 500
+
     def _finish_if_due(self):
         if self.finish_at is not None and time.time()*1000 >= self.finish_at:
             self.speaking = False
@@ -39,6 +45,26 @@ class PlaybackEngine:
             self.finish_at = None
             if self.recent:
                 self.recent[-1]["ended_ms"] = self.ended_ms
+            return
+        if not self.speaking or self.first_audio_ms is not None or not self.recent:
+            return
+        started = int(self.recent[-1].get("started_ms") or 0)
+        if not started or time.time()*1000 - started < self.STALL_MS:
+            return
+        self.speaking = False
+        self.ended_ms = int(time.time()*1000)
+        self.recent[-1]["ended_ms"] = self.ended_ms
+        self.error = (f"output produced no audio within {self.STALL_MS} ms; "
+                      "the output stream was rebuilt, this sentence was not heard")
+        self.stop_mode = "stalled"
+        self._rebuild_output()
+
+    def _rebuild_output(self):
+        try:
+            self.close()
+            self.warmup(self.rate or 16000)
+        except Exception as exc:
+            self.error += f"; rebuild failed: {exc}"
 
     def state(self):
         with self.lock:
@@ -48,11 +74,30 @@ class PlaybackEngine:
                     "reference_enabled": True, "output_warm": self.stream is not None,
                     "fade_remaining_ms":self.fade_remaining*1000/max(1,self.rate),"stop_mode":self.stop_mode}
 
+    def _stream_alive(self):
+        """A stream object is not a working stream.
+
+        Re-initialising PortAudio — which the capture supervisor does to see
+        whether the array is still on the bus — invalidates every stream in the
+        process, including this one. The object survives, `active` does not, and
+        warmup used to keep the corpse: output_warm stayed true, the render
+        callback never ran again, so first_audio_ms stayed null, `speaking`
+        never cleared, and every reply after that waited forever for playback
+        that was not happening.
+        """
+        stream = self.stream
+        if stream is None:
+            return False
+        try:
+            return bool(stream.active)
+        except Exception:
+            return False
+
     def warmup(self, rate=16000):
         import sounddevice as sd
         with self.operation_lock:
             device = int(sd.query_devices(kind="output").get("index", sd.default.device[1]))
-            if self.stream is not None and self.rate == rate and self.device == device:
+            if self._stream_alive() and self.rate == rate and self.device == device:
                 return
             self.close()
             self.rate, self.device = rate, device
