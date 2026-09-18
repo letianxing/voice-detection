@@ -137,6 +137,31 @@ def offline_pass_is_corroborated(streamed_final) -> bool:
     return streamed_final is not None and bool(str(streamed_final.text or "").strip())
 
 
+def offline_text_agrees(offline_text, streamed_text, floor=.4) -> bool:
+    """Did the two recognisers hear the same sentence?
+
+    The offline pass re-reads the finished utterance and is normally the better
+    of the two, which is why its text is the one that reaches memory and the
+    model. That stops being true when something has rewritten the audio first:
+    switched to target-speaker extraction in the field, 「今天天气怎么样」 came
+    back from the offline pass as 「在他工场呢。」 while the streaming model had
+    it right. Two recognisers disagreeing completely is a signal, not a
+    tie-break — the audio one of them read was not speech.
+
+    Characters in common over the shorter sentence, which is crude on purpose:
+    it only has to separate "the same sentence, differently punctuated" from
+    "a different sentence entirely".
+    """
+    offline = re.sub(r"[^\w\u4e00-\u9fff]", "", str(offline_text or ""))
+    streamed = re.sub(r"[^\w\u4e00-\u9fff]", "", str(streamed_text or ""))
+    if not offline or not streamed:
+        return True
+    from difflib import SequenceMatcher
+    shared = sum(block.size for block in SequenceMatcher(None, offline, streamed,
+                                                         autojunk=False).get_matching_blocks())
+    return shared / max(1, min(len(offline), len(streamed))) >= floor
+
+
 class SherpaSenseVoiceAsrAdapter(AsrAdapter):
     """Offline SenseVoice for the finished sentence only.
 

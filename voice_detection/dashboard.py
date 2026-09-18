@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from .frontend import CocktailFrontend, now_ms
 from .asr import (ExternalCommandAsrAdapter, NullAsrAdapter, SherpaSenseVoiceAsrAdapter,
                   SherpaZipformerAsrAdapter, VoskAsrAdapter, offline_pass_is_corroborated,
-                  resample_mono, write_wav)
+                  offline_text_agrees, resample_mono, write_wav)
 from .echo_guard import ECHO_RESIDUAL, own_voice
 from .io import list_sounddevice_devices
 from .profiles import get_profile, load_profiles
@@ -782,6 +782,19 @@ class LiveMonitor:
             speaker = context.pop("speaker", {})
             data["speaker_vector"] = speaker.pop("embedding", [])
             data.update(context)
+            # If something rewrote the audio before the offline pass read it, the
+            # offline text can be a different sentence entirely. The streaming
+            # model read the microphone, so when the two disagree completely it
+            # is the one to believe.
+            streamed = (self.last_streaming_transcript or {}).get("text") or ""
+            tse = self.last_tse or {}
+            if (tse.get("enabled") and streamed and data.get("text")
+                    and not offline_text_agrees(data["text"], streamed)):
+                data["offline_text_rejected"] = data["text"]
+                data["text"] = streamed
+                data["text_source"] = "streaming_after_extraction_disagreed"
+                self.asr_error = (f"目标提取后的离线转写与流式结果不一致，改用流式："
+                                  f"{data['offline_text_rejected']!r} vs {streamed!r}")
             residual = float(data.get("self_echo_probability") or 0)
             echo_match = self.playback.echo_match(data.get("text", ""), int(data.get("started_ms") or 0), int(data.get("ended_ms") or now_ms()), float(speaker.get("similarity") or 0),
                                                   residual)
@@ -825,14 +838,31 @@ class LiveMonitor:
         with self.lock:
             self.asr_error = error
 
+    # Target-speaker extraction rewrites the audio to keep one voice. On audio
+    # that already has one voice in it there is nothing to keep and the model
+    # still rebuilds the waveform: switched to speakerbeam in the field,
+    # 「今天天气怎么样」 — which the streaming recogniser got right — came out of
+    # the offline pass as 「在他工场呢。」, and four more sentences after it were
+    # equally wrong. So extraction is for overlapped speech, and `auto` means
+    # exactly that: use it when there is more than one voice to separate.
+    OVERLAP_FOR_TSE = .35
+
     def _preprocess_tse_audio(self, audio, sample_rate_hz):
         if self.tse_mode not in {"speakerbeam", "auto"}:
+            return audio
+        overlap = float((self.last_track or {}).get("overlap_probability") or 0)
+        if self.tse_mode == "auto" and overlap < self.OVERLAP_FOR_TSE:
+            with self.lock:
+                self.last_tse = {"backend": "auto-single-voice", "enabled": False, "healthy": True,
+                                 "target_probability": 1.0, "latency_ms": 0.0,
+                                 "reason": f"overlap {overlap:.2f} < {self.OVERLAP_FOR_TSE}: 只有一个人在说，不做提取"}
             return audio
         result = self.target_speaker_extractor.process_utterance(audio, sample_rate_hz)
         with self.lock:
             self.last_tse = {
                 "backend": result.backend, "enabled": result.enabled, "healthy": result.healthy,
                 "target_probability": result.target_probability, "latency_ms": round(result.latency_ms, 2),
+                "overlap_probability": round(overlap, 3),
             }
         return result.audio
 

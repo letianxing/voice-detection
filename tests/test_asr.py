@@ -110,3 +110,31 @@ class SenseVoiceFinalPassTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OfflineDisagreementTests(unittest.TestCase):
+    """两个识别器听出完全不同的句子，是信号，不是平手。
+
+    Switched to target-speaker extraction in the field, 「今天天气怎么样」 —
+    which the streaming recogniser had right — came out of the offline pass as
+    「在他工场呢。」, and the four sentences after it were equally wrong. The
+    offline pass is normally the better of the two, which is exactly why it is
+    the text that reaches memory and the model; that stops being true when
+    something has rewritten the audio it read.
+    """
+
+    def test_the_field_case_is_a_disagreement(self):
+        from voice_detection.asr import offline_text_agrees
+        self.assertFalse(offline_text_agrees("在他工场呢。", "今天天气怎么样"))
+        self.assertFalse(offline_text_agrees("他他他干嘛。", "你在忙什么呀"))
+
+    def test_punctuation_and_a_missed_character_still_agree(self):
+        from voice_detection.asr import offline_text_agrees
+        self.assertTrue(offline_text_agrees("今天天气怎么样？", "今天天气怎么样"))
+        self.assertTrue(offline_text_agrees("上海今天多云。", "上海今天多云"))
+        self.assertTrue(offline_text_agrees("我想出去玩了", "我想出去玩"))
+
+    def test_nothing_to_compare_is_not_a_disagreement(self):
+        from voice_detection.asr import offline_text_agrees
+        self.assertTrue(offline_text_agrees("今天天气怎么样", ""))
+        self.assertTrue(offline_text_agrees("", "今天天气怎么样"))
