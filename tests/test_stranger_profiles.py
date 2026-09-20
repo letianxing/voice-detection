@@ -83,7 +83,9 @@ class VoicePoolLearningTest(unittest.TestCase):
             sample = [0.9, 0.44, 0.0, 0.0]
             self.assertFalse(store.add_verified_sample("天行", sample, "天行", .9, {"overlap": .5, "echo": 0., "duration_ms": 3000}))
             self.assertFalse(store.add_verified_sample("天行", sample, "天行", .9, {"overlap": 0., "echo": .5, "duration_ms": 3000}))
-            self.assertFalse(store.add_verified_sample("天行", sample, "天行", .5, self.good()))
+            # 人脸自己的判定阈值是 0.38（sface），低于它就不是一次识别；
+            # 门槛按那把尺子来，不是拿一个绝对数字去卡。
+            self.assertFalse(store.add_verified_sample("天行", sample, "天行", .30, self.good()))
 
     def test_stranger_clusters_do_not_block_the_owner(self):
         import tempfile, pathlib

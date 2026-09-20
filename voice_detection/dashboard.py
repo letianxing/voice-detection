@@ -1047,7 +1047,8 @@ def make_handler(monitor: LiveMonitor):
                     accepted=False
                     if valid and sample.get("speaker_vector"):
                         accepted=monitor.speaker_profiles.add_verified_sample(str(payload.get("person_id")),sample["speaker_vector"],str(payload.get("face_person_id")),float(payload.get("face_confidence") or 0),
-                            {"overlap":float(sample.get("overlap_probability") or 0),"echo":float(sample.get("self_echo_probability") or 0),"duration_ms":int(sample.get("ended_ms") or 0)-int(sample.get("started_ms") or 0)})
+                            {"overlap":float(sample.get("overlap_probability") or 0),"echo":float(sample.get("self_echo_probability") or 0),"duration_ms":int(sample.get("ended_ms") or 0)-int(sample.get("started_ms") or 0)},
+                            face_floor=payload.get("face_floor"))
                     if accepted and not monitor.speaker_profiles.profiles[str(payload.get("person_id"))].get("reference_path") and getattr(monitor,"_last_utterance_key",None)==(sample.get("started_ms"),sample.get("ended_ms")):
                         monitor.save_tse_reference(str(payload["person_id"]))
                     # This voice was auto-registered as a stranger and the face

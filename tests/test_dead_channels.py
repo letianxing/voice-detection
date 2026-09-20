@@ -44,6 +44,16 @@ class ReopenSilentArrayTests(unittest.TestCase):
                 return {"acoustic": {"channel_rms": levels}}
 
         monitor.scene = Scene()
+
+        class Playback:
+            error = ""
+
+            def close(self): (calls or []).append("playback_closed")
+
+            def warmup(self, rate=16000): (calls or []).append("playback_warmed")
+
+        monitor.playback = Playback()
+        monitor._reload_devices = lambda: calls.append("reload")
         monitor._teardown = lambda: calls.append("teardown")
         monitor._start_once = lambda *args: calls.append(("start",) + args)
         return monitor
@@ -58,7 +68,9 @@ class ReopenSilentArrayTests(unittest.TestCase):
         self.assertEqual(calls, [])          # one observation is not a verdict
         monitor._repair_dead_channels(monitor.desired)
         self.assertEqual(calls[0], "teardown")
-        self.assertEqual(calls[1][1], "sipeed_6_plus_1_usb_array")
+        self.assertIn("reload", calls)      # 设备表刷新前先关掉播放流
+        start = next(item for item in calls if isinstance(item, tuple) and item[0] == "start")
+        self.assertEqual(start[1], "sipeed_6_plus_1_usb_array")
         self.assertEqual(monitor.reopen_count, 1)
         self.assertIn("重开采集流", monitor.capture_warning)
 

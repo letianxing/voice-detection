@@ -34,6 +34,13 @@ class BootstrapTests(unittest.TestCase):
         self.addCleanup(lambda: None)
         return SpeakerProfileStore(_p.Path(folder) / 'speaker_profiles.json')
 
+    def test_the_bar_travels_with_the_sample(self):
+        """0.45 在 sface 的尺度上是一次可靠识别，不该被当成没认出来。"""
+        store = self.profiles()
+        self.assertFalse(store.add_verified_sample('天行', voice(3), '天行', .45, clean(), face_floor=.44))
+        self.assertTrue(store.add_verified_sample('天行', voice(3, .3), '天行', .45, clean(), face_floor=.44))
+        self.assertIn('天行', store.profiles)
+
     def test_two_agreeing_face_verified_samples_open_the_file(self):
         store = self.profiles()
         self.assertNotIn('天行', store.profiles)
@@ -57,9 +64,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn('天行', store.profiles)
 
     def test_a_face_nobody_is_sure_about_teaches_nothing(self):
+        """低于人脸模型自己的判定阈值，那不是一次识别。
+
+        门槛由调用方按人脸模型的尺度给：实测 sface 认出天行是 0.450，
+        它自己的阈值是 0.380——拿一个绝对的 0.8 去卡，每条样本都会被拒，
+        池子永远是空的，这正是现场发生的事。
+        """
         store = self.profiles()
-        store.add_verified_sample('天行', voice(1), '天行', .5, clean())
-        store.add_verified_sample('天行', voice(1, .2), '天行', .5, clean())
+        store.add_verified_sample('天行', voice(1), '天行', .30, clean(), face_floor=.44)
+        store.add_verified_sample('天行', voice(1, .2), '天行', .30, clean(), face_floor=.44)
         self.assertNotIn('天行', store.profiles)
         self.assertIn('人脸只有', store.last_pool_reason)
 

@@ -432,12 +432,14 @@ class SpeakerProfileStore:
     # to put anybody's voice into this pool.
     FACE_VERIFIED_FLOOR = .35
 
-    # 人脸有多确定，才够格拿这句话去教声纹。Same number the attention service
-    # uses to decide whether to offer the sample at all; two different bars
-    # only meant posting samples that were refused on arrival.
-    FACE_LEARNING_FLOOR = .75
+    # 人脸有多确定，才够格拿这句话去教声纹。门槛由调用方给：它知道人脸模型
+    # 自己的判定阈值，而这个分数只有在那把尺子上才有意义——实测 sface 认出
+    # 天行是 0.450，它自己的阈值是 0.380，而这里原本写死 0.8，于是每一条样本
+    # 都被拒，池子永远是空的。这里只兜一个底，防止调用方把门槛调没。
+    FACE_LEARNING_FLOOR = .40
+    FACE_LEARNING_MINIMUM = .30
 
-    def add_verified_sample(self,identity,embedding,face_identity,face_confidence,quality):
+    def add_verified_sample(self,identity,embedding,face_identity,face_confidence,quality,face_floor=None):
         """Learn this person's voice from an utterance the face already identified.
 
         The old rule also required the voiceprint to score .7 against the pool it
@@ -451,7 +453,9 @@ class SpeakerProfileStore:
         must be at least vaguely this person. The audio quality bar stays where
         it was — overlapped or echoing speech teaches the pool the room, not the
         person."""
-        floor=float(getattr(self,'face_learning_floor',self.FACE_LEARNING_FLOOR))
+        floor=max(self.FACE_LEARNING_MINIMUM,
+                  float(face_floor if face_floor is not None
+                        else getattr(self,'face_learning_floor',self.FACE_LEARNING_FLOOR)))
         for failed,reason in ((identity!=face_identity,'声纹要教的人和人脸认出的人不是同一个'),
                               (face_confidence<floor,f'人脸只有 {face_confidence:.2f}，低于 {floor:.2f}'),
                               (quality.get('overlap',1)>.15,'这句话有重叠说话'),
