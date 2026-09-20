@@ -480,11 +480,21 @@ class SpeakerProfileStore:
                 self.last_pool_reason='这段听起来是机器人自己的播放'
                 return False   # the robot's own playback is not a sample of anybody
             ranked=self.rank(embedding)
+            mine=next((row['score'] for row in ranked if row['speaker_id']==identity),0.)
             named=[row for row in ranked if row['role'] in {'owner','known'}]
-            if named and named[0]['speaker_id']!=identity and named[0]['score']>=.6:
-                self.last_pool_reason=f'声纹更像 {named[0]["speaker_id"]}，与人脸矛盾，不学'
+            # 「更像别人」要比得过他自己才算矛盾。Raw cosine is not comparable across
+            # voices — every ERes2NetV2 embedding on this machine carries a large
+            # common component (mean 0.62 against the cohort mean), so a bare
+            # 0.6 against somebody else says almost nothing. In the field it
+            # said 「声纹说是 robot」 for a man standing in front of the camera
+            # and blocked every sample he could have taught. What counts is
+            # standing clear of *this* person by a real margin.
+            if named and named[0]['speaker_id']!=identity and \
+                    named[0]['score']-mine>=self.thresholds['margin_floor']:
+                self.last_pool_reason=(f'声纹更像 {named[0]["speaker_id"]} {named[0]["score"]:.2f}，'
+                                       f'比 {identity} {mine:.2f} 高出 {named[0]["score"]-mine:.2f}，与人脸矛盾，不学')
                 return False   # the voiceprint names a different enrolled person; that is a conflict, not a sample
-            score=next((row['score'] for row in ranked if row['speaker_id']==identity),0.)
+            score=mine
             if score<self.FACE_VERIFIED_FLOOR:
                 self.last_pool_reason=f'与已有声纹只有 {score:.2f}，先攒着等第二条吻合的'
                 return self._second_opinion(identity,embedding)
