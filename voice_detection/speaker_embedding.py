@@ -100,6 +100,10 @@ class SpeakerProfileStore:
         self.thresholds = {"threshold": self.MATCH_THRESHOLD, "raw_floor": self.RAW_FLOOR,
                            "z_floor": self.Z_FLOOR, "margin_floor": self.MARGIN_FLOOR}
         self.last_decision: dict[str, Any] = {}
+        # 上一次「人脸教声纹」的结果：补进去了，还是为什么没补。
+        # Without it, a pool that never grows looks exactly like one that has
+        # nothing to learn from.
+        self.last_pool_reason: str = '还没有过人脸确认的样本'
         # Face-verified samples waiting for a second opinion. In memory only:
         # a sample nothing has corroborated yet does not belong on disk.
         self.pending: dict[str, list] = {}
@@ -428,6 +432,11 @@ class SpeakerProfileStore:
     # to put anybody's voice into this pool.
     FACE_VERIFIED_FLOOR = .35
 
+    # 人脸有多确定，才够格拿这句话去教声纹。Same number the attention service
+    # uses to decide whether to offer the sample at all; two different bars
+    # only meant posting samples that were refused on arrival.
+    FACE_LEARNING_FLOOR = .75
+
     def add_verified_sample(self,identity,embedding,face_identity,face_confidence,quality):
         """Learn this person's voice from an utterance the face already identified.
 
@@ -442,25 +451,46 @@ class SpeakerProfileStore:
         must be at least vaguely this person. The audio quality bar stays where
         it was — overlapped or echoing speech teaches the pool the room, not the
         person."""
-        if identity!=face_identity or face_confidence<.8 or quality.get('overlap',1)>.15 or quality.get('echo',1)>.2 or quality.get('duration_ms',0)<2000:
-            return False
+        floor=float(getattr(self,'face_learning_floor',self.FACE_LEARNING_FLOOR))
+        for failed,reason in ((identity!=face_identity,'声纹要教的人和人脸认出的人不是同一个'),
+                              (face_confidence<floor,f'人脸只有 {face_confidence:.2f}，低于 {floor:.2f}'),
+                              (quality.get('overlap',1)>.15,'这句话有重叠说话'),
+                              (quality.get('echo',1)>.2,'这句话里混了机器人自己的播放'),
+                              (quality.get('duration_ms',0)<2000,'这句话不够 2 秒，做模板太短')):
+            if failed:
+                self.last_pool_reason=reason
+                return False
         with self.lock:
             profile=self.profiles.get(identity)
-            if not profile or profile.get('role') not in {'owner','known'}:return False
+            if profile is None:
+                # 人脸认得出他，声纹库里却没有他——注册时只成功存了人脸就是这种
+                # 情况。以前这里直接 return False，于是这个人永远学不到声纹，
+                # 离开镜头就再也认不出来；现场 16:42 那次就是这样。开档的条件
+                # 和加锚点一样严：两条互相吻合的、人脸确认过的样本。
+                self.last_pool_reason='还没有声纹档案，先攒一条，等第二条吻合的就开档'
+                return self._second_opinion(identity,embedding,role='known')
+            if profile.get('role') not in {'owner','known'}:
+                self.last_pool_reason=f'{identity} 在声纹库里的角色是 {profile.get("role")}，不学'
+                return False
             if self.sounds_like_the_robot(embedding):
+                self.last_pool_reason='这段听起来是机器人自己的播放'
                 return False   # the robot's own playback is not a sample of anybody
             ranked=self.rank(embedding)
             named=[row for row in ranked if row['role'] in {'owner','known'}]
             if named and named[0]['speaker_id']!=identity and named[0]['score']>=.6:
+                self.last_pool_reason=f'声纹更像 {named[0]["speaker_id"]}，与人脸矛盾，不学'
                 return False   # the voiceprint names a different enrolled person; that is a conflict, not a sample
             score=next((row['score'] for row in ranked if row['speaker_id']==identity),0.)
             if score<self.FACE_VERIFIED_FLOOR:
+                self.last_pool_reason=f'与已有声纹只有 {score:.2f}，先攒着等第二条吻合的'
                 return self._second_opinion(identity,embedding)
             try:
                 self.enroll(identity,embedding,profile['role'],profile.get('enrollment_text',''),
                             anchor_floor=self.FACE_VERIFIED_FLOOR)
             except ValueError:
+                self.last_pool_reason='与原始锚点差太远，先攒着等第二条吻合的'
                 return self._second_opinion(identity,embedding)
+            self.last_pool_reason=f'已补入 {identity} 的声纹池（与已有声纹 {score:.2f}）'
             return True
 
     # Two face-verified samples that agree with each other open a second anchor
@@ -473,7 +503,7 @@ class SpeakerProfileStore:
     SECOND_OPINION_AGREEMENT = .5
     SECOND_OPINION_WINDOW_MS = 600000
 
-    def _second_opinion(self,identity,embedding):
+    def _second_opinion(self,identity,embedding,role=''):
         vector=self._unit(embedding)
         if vector is None:
             return False
@@ -485,13 +515,25 @@ class SpeakerProfileStore:
                 continue
             if float(np.dot(vector,other))>=self.SECOND_OPINION_AGREEMENT:
                 self.pending[identity]=[]
-                return self._admit_anchor_group(identity,[held,vector.tolist()])
+                return self._admit_anchor_group(identity,[held,vector.tolist()],role=role)
         self.pending[identity]=(waiting+[(now,vector.tolist())])[-4:]
         return False
 
-    def _admit_anchor_group(self,identity,vectors):
-        """Add samples the existing anchor cannot reach, as their own anchor."""
+    def _admit_anchor_group(self,identity,vectors,role=''):
+        """Add samples the existing anchor cannot reach, as their own anchor.
+
+        With `role` given this also opens the file itself, for somebody the
+        camera knows and the voiceprint store has never heard: two agreeing
+        face-verified samples are the same evidence that earns a second anchor,
+        and without it a person enrolled by face alone stays unrecognisable the
+        moment they step out of frame.
+        """
         profile=self.profiles.get(identity)
+        if not profile and role:
+            profile=self.profiles.setdefault(identity,{"role":role,"embeddings":[],
+                                                       "aliases":[],"enrollment_text":"",
+                                                       "created_by":"face_verified_samples"})
+            self.last_pool_reason=f'两条人脸确认过的样本互相吻合，给 {identity} 建了声纹档案'
         if not profile:
             return False
         pool=list(profile.get("embeddings") or [profile.get("embedding")])

@@ -1055,7 +1055,14 @@ def make_handler(monitor: LiveMonitor):
                     # person's pool instead of competing with it.
                     cluster=str(payload.get("cluster_id") or "")
                     merged=bool(cluster and accepted and monitor.speaker_profiles.merge_cluster(cluster,str(payload.get("person_id"))))
-                    self._send_json({"accepted":accepted,"cluster_merged":merged})
+                    reason=getattr(monitor.speaker_profiles,"last_pool_reason","")
+                    if not valid:
+                        reason="这句话已经不是最新的一句，或者是机器人自己的回声"
+                    elif not sample.get("speaker_vector"):
+                        reason="这句话没有声纹向量"
+                    pool=(monitor.speaker_profiles.profiles.get(str(payload.get("person_id"))) or {})
+                    self._send_json({"accepted":accepted,"cluster_merged":merged,"reason":reason,
+                                     "pool_size":len(pool.get("embeddings") or ([pool["embedding"]] if pool.get("embedding") else []))})
             elif parsed.path == "/api/enroll-speaker":
                 payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8") or "{}")
                 speaker_id = str(payload.get("speaker_id") or "").strip()
