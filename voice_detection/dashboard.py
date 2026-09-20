@@ -497,6 +497,12 @@ class LiveMonitor:
                 frame.stamp_ms,
                 bool(track and human_voice),
                 track.track_id if track else "",
+                # 机器人自己在说的时候录到的音，和它不说时录到的音，
+                # 不能算同一句话。Read as a plain flag on purpose: this runs on
+                # every captured frame, and state() takes the playback lock that
+                # the render callback holds. The render callback maintains the
+                # flag itself, so it is current without the contention.
+                playing=bool(self.playback.speaking),
             )
             feed_audio = target_audio
             if track and human_voice and self._streaming_asr is None and self._streaming_adapter is not None:

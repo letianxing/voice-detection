@@ -23,12 +23,30 @@ class Utterance:
 
 
 class UtteranceSegmenter:
+    """一段话的边界。除了静音，还有一条：机器人自己在不在说。
+
+    Field case, 2026-09-20: the robot played 「上海晴，28度。」 and the man
+    answered 「我让你查冰淇淋店。」 before the 480 ms of silence that ends an
+    utterance had gone by, so both landed in *one* segment — four seconds of
+    audio, two speakers, one transcript. Downstream there is no good outcome
+    for that. The echo guard scored it 0.275 self-echo (most of it was the
+    robot, so it was thrown away as the robot's own voice) and the man had to
+    repeat himself; had his half been the longer one, the robot would have
+    answered its own sentence.
+
+    So playback is a boundary. Audio recorded while the robot was speaking and
+    audio recorded while it was not are never the same utterance, and the
+    pre-roll is dropped at the cut — 180 ms of the other side's voice is
+    exactly what must not lead the next segment.
+    """
+
     def __init__(
         self,
         pre_roll_ms: int = 180,
         endpoint_silence_ms: int = 480,
         min_speech_ms: int = 80,
         max_utterance_ms: int = 20_000,
+        playback_tail_ms: int = 150,
     ):
         self.pre_roll_ms = max(0, int(pre_roll_ms))
         self.endpoint_silence_ms = max(40, int(endpoint_silence_ms))
@@ -40,6 +58,11 @@ class UtteranceSegmenter:
         self._started_ms = 0
         self._speech_ms = 0.0
         self._silence_ms = 0.0
+        # The speaker keeps ringing for a moment after the stream stops, and
+        # that tail belongs to the robot's segment, not to whoever speaks next.
+        self.playback_tail_ms = max(0, int(playback_tail_ms))
+        self._playing = False
+        self._playing_until_ms = 0
 
     def process(
         self,
@@ -48,20 +71,22 @@ class UtteranceSegmenter:
         stamp_ms: int,
         speech_active: bool,
         track_id: str,
+        playing: bool = False,
     ) -> Utterance | None:
         data = np.asarray(samples, dtype=np.float32).reshape(-1).copy()
         duration_ms = 1000.0 * data.size / max(1, sample_rate_hz)
+        boundary = self._playback_boundary(bool(playing), sample_rate_hz, stamp_ms)
         if not self._chunks:
             self._append_pre_roll(data, stamp_ms, duration_ms)
             if not speech_active:
-                return None
+                return boundary
             self._chunks = [chunk for chunk, _stamp in self._pre_roll]
             self._started_ms = self._pre_roll[0][1] if self._pre_roll else stamp_ms
             self._track_id = track_id or "voice_mono"
             self._speech_ms = duration_ms
             self._silence_ms = 0.0
             self._pre_roll.clear()
-            return None
+            return boundary
 
         self._chunks.append(data)
         if speech_active:
@@ -71,8 +96,22 @@ class UtteranceSegmenter:
             self._silence_ms += duration_ms
         total_ms = 1000.0 * sum(chunk.size for chunk in self._chunks) / max(1, sample_rate_hz)
         if self._silence_ms < self.endpoint_silence_ms and total_ms < self.max_utterance_ms:
+            return boundary
+        return boundary or self._finish(sample_rate_hz, stamp_ms + int(duration_ms))
+
+    def _playback_boundary(self, playing: bool, sample_rate_hz: int, stamp_ms: int) -> Utterance | None:
+        """Cut here if the robot just started or just finished speaking."""
+        if playing:
+            self._playing_until_ms = int(stamp_ms) + self.playback_tail_ms
+        speaking = playing or int(stamp_ms) < self._playing_until_ms
+        if speaking == self._playing:
             return None
-        return self._finish(sample_rate_hz, stamp_ms + int(duration_ms))
+        self._playing = speaking
+        if not self._chunks:
+            return None
+        finished = self._finish(sample_rate_hz, stamp_ms)
+        self._pre_roll.clear()
+        return finished
 
     @property
     def active(self):
