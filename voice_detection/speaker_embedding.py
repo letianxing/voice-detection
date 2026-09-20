@@ -438,6 +438,11 @@ class SpeakerProfileStore:
     # 都被拒，池子永远是空的。这里只兜一个底，防止调用方把门槛调没。
     FACE_LEARNING_FLOOR = .40
     FACE_LEARNING_MINIMUM = .30
+    # 够长到能算出一个embedding就行。同一个人每次说话都有细微差别，那正是
+    # 池子要收集的东西；2 秒的门槛把日常的短句全挡在外面，池子长不起来。
+    # The session layer computes embeddings from 1.2 s windows, so that is the
+    # honest floor for a sample rather than a round number.
+    MIN_LEARNING_MS = 1200
 
     def add_verified_sample(self,identity,embedding,face_identity,face_confidence,quality,face_floor=None):
         """Learn this person's voice from an utterance the face already identified.
@@ -460,7 +465,8 @@ class SpeakerProfileStore:
                               (face_confidence<floor,f'人脸只有 {face_confidence:.2f}，低于 {floor:.2f}'),
                               (quality.get('overlap',1)>.15,'这句话有重叠说话'),
                               (quality.get('echo',1)>.2,'这句话里混了机器人自己的播放'),
-                              (quality.get('duration_ms',0)<2000,'这句话不够 2 秒，做模板太短')):
+                              (quality.get('duration_ms',0)<self.MIN_LEARNING_MS,
+                               f'这句话不够 {self.MIN_LEARNING_MS/1000:.1f} 秒，做模板太短')):
             if failed:
                 self.last_pool_reason=reason
                 return False

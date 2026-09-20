@@ -78,10 +78,17 @@ class BootstrapTests(unittest.TestCase):
 
     def test_and_neither_does_a_one_second_answer(self):
         store = self.profiles()
-        store.add_verified_sample('天行', voice(1), '天行', .9, clean(duration_ms=900))
-        store.add_verified_sample('天行', voice(1, .2), '天行', .9, clean(duration_ms=900))
+        store.add_verified_sample('天行', voice(1), '天行', .9, clean(duration_ms=700))
+        store.add_verified_sample('天行', voice(1, .2), '天行', .9, clean(duration_ms=700))
         self.assertNotIn('天行', store.profiles)
-        self.assertIn('不够 2 秒', store.last_pool_reason)
+        self.assertIn('做模板太短', store.last_pool_reason)
+
+    def test_an_ordinary_短_sentence_still_teaches(self):
+        """日常说话大多一两秒；再严就等于池子永远长不起来。"""
+        store = self.profiles()
+        store.enroll('天行', voice(1), 'known')
+        self.assertTrue(store.add_verified_sample('天行', voice(1, .5), '天行', .9,
+                                                  clean(duration_ms=1400)))
 
     def test_a_voice_that_is_clearly_somebody_else_enrolled_is_refused(self):
         store = self.profiles()
