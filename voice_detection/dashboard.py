@@ -4,6 +4,7 @@ import argparse
 import signal
 from collections import deque
 from .playback import PlaybackEngine
+from .asd_capture import AudioWindows
 from .scene_runtime import SceneRuntime, empty_music
 from .ros_publisher import BrainRosPublisher
 from dataclasses import asdict, replace
@@ -152,6 +153,7 @@ def _compact_transcripts(transcripts) -> list[dict]:
 class LiveMonitor:
     def __init__(self) -> None:
         self.lock = threading.Lock()
+        self.asd_audio = AudioWindows()
         self.running = False
         self.error = ""
         self.last_track: dict[str, object] | None = None
@@ -464,6 +466,8 @@ class LiveMonitor:
             reference = self.playback.aligned_reference(frame)
             output = frontend.process(frame, reference)
             echo = output.tracks[0].self_echo_probability if output.tracks else 0.0
+            self.asd_audio.append(frame.stamp_ms, output.target_audio, frame.sample_rate_hz,
+                                  output.tracks[0].track_id if output.tracks else '', echo)
             if self.scene is not None:
                 self.scene.submit(frame, output.target_audio, output.tracks[0].raw_echo_probability if output.tracks else echo, track_id=output.target_track_id, vad_active=output.vad_active, playback_reference=self.playback.reference.read_for(frame))
             human_voice = bool(output.vad_active and echo < 0.75)
@@ -718,6 +722,7 @@ class LiveMonitor:
 
     def _teardown(self) -> None:
         self._capture_generation += 1
+        self.asd_audio.clear()
         self._speaker_stop.set()
         worker, self._speaker_worker = self._speaker_worker, None
         if worker is not None:
@@ -732,6 +737,7 @@ class LiveMonitor:
             except Exception:
                 pass
             self._stream = None
+        self.asd_audio.clear()
         if self._segmenter is not None and self._asr_worker is not None:
             utterance = self._segmenter.flush(self._sample_rate_hz, now_ms())
             if utterance is not None:
@@ -950,6 +956,13 @@ def make_handler(monitor: LiveMonitor):
                 self._send_json(monitor.playback.state())
             elif parsed.path == "/api/state":
                 self._send_json(monitor.state(compact=parse_qs(parsed.query).get("compact") == ["1"]))
+            elif parsed.path == '/api/asd-audio':
+                try:
+                    end = int(parse_qs(parsed.query).get('ended_ms',['0'])[0])
+                    self._send_json(monitor.asd_audio.window(end,now_ms()) if monitor.running else
+                                    {'available':False,'reason':'voice_stopped'})
+                except (ValueError,TypeError):
+                    self.send_error(HTTPStatus.BAD_REQUEST)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
 
